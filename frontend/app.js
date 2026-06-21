@@ -148,4 +148,15 @@ $("#newBtn").onclick = () => {
   $("#input").focus();
 };
 
+$("#logoutBtn").onclick = async () => {
+  try { await fetch("/api/logout", {method: "POST"}); } catch (e) {}
+  // limpia estado local y vuelve a la pantalla de login
+  sessionId = null; localStorage.removeItem("claude_session");
+  log.innerHTML = "";
+  for (const id of ["#app-header", "#log", "#app-footer"]) $(id).classList.add("hidden");
+  $("#login").classList.remove("hidden");
+  $("#pw").value = ""; $("#code").value = ""; $("#loginErr").textContent = "";
+  $("#pw").focus();
+};
+
 checkAuth();

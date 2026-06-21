@@ -145,10 +145,18 @@ def load_config() -> dict:
     cfg.setdefault("workdir", str(Path.home()))
     cfg.setdefault("model", None)  # p.ej. "opus", "sonnet"; None = el del CLI
     cfg.setdefault("claude_bin", None)  # ruta al CLI; None = autodetectar
+    cfg.setdefault("cookie_secure", True)  # cookie solo por HTTPS (Tailscale serve)
+    cfg.setdefault("session_days", 30)     # caducidad de la sesión
     if changed or not CONF_PATH.exists():
         CONF_PATH.write_text(json.dumps(cfg, indent=2))
         os.chmod(CONF_PATH, 0o600)
     return cfg
+
+
+def save_config(cfg: dict) -> None:
+    """Reescribe panel.conf (permisos 600). Usado por --set-password/--reset-totp."""
+    CONF_PATH.write_text(json.dumps(cfg, indent=2))
+    os.chmod(CONF_PATH, 0o600)
 
 
 CFG = load_config()
@@ -202,8 +210,104 @@ def register_login_result(ok: bool) -> None:
                 _login_fails = 0
 
 
-def auth_token() -> str:
-    return hmac.new(CFG["secret"].encode(), b"authed", hashlib.sha256).hexdigest()
+# --------------------------------------------------------------------------- #
+# Contraseña: hash scrypt (en vez de texto plano). Compatible hacia atrás con
+# el campo `password` heredado mientras no se ejecute --set-password.
+# --------------------------------------------------------------------------- #
+def hash_password(pw: str) -> str:
+    salt = secrets.token_bytes(16)
+    dk = hashlib.scrypt(pw.encode(), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+    return f"scrypt$16384$8$1${salt.hex()}${dk.hex()}"
+
+
+def verify_password(pw: str) -> bool:
+    stored = CFG.get("password_hash")
+    if stored:
+        try:
+            algo, n, r, p, salt_hex, hash_hex = stored.split("$")
+            if algo != "scrypt":
+                return False
+            dk = hashlib.scrypt(pw.encode(), salt=bytes.fromhex(salt_hex),
+                                n=int(n), r=int(r), p=int(p), dklen=len(hash_hex) // 2)
+            return hmac.compare_digest(dk.hex(), hash_hex)
+        except Exception:
+            return False
+    legacy = CFG.get("password")  # texto plano del primer arranque
+    return bool(legacy) and hmac.compare_digest(pw, str(legacy))
+
+
+# --------------------------------------------------------------------------- #
+# Sesiones: token aleatorio por login, con caducidad y revocables (logout).
+# Persisten en sessions.json para sobrevivir reinicios.
+# --------------------------------------------------------------------------- #
+SESS_PATH = BASE / "sessions.json"
+_sess_lock = threading.Lock()
+
+
+def _load_sessions() -> dict:
+    try:
+        return json.loads(SESS_PATH.read_text())
+    except Exception:
+        return {}
+
+
+_sessions = _load_sessions()  # token -> epoch de expiración
+
+
+def _save_sessions_locked() -> None:
+    try:
+        SESS_PATH.write_text(json.dumps(_sessions))
+        os.chmod(SESS_PATH, 0o600)
+    except Exception:
+        pass
+
+
+def session_ttl() -> int:
+    return int(CFG.get("session_days", 30)) * 86400
+
+
+def create_session() -> str:
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    with _sess_lock:
+        for t in [t for t, exp in _sessions.items() if exp < now]:  # purga caducadas
+            del _sessions[t]
+        _sessions[token] = now + session_ttl()
+        _save_sessions_locked()
+    return token
+
+
+def session_valid(token: str) -> bool:
+    if not token:
+        return False
+    with _sess_lock:
+        exp = _sessions.get(token)
+        if exp is None:
+            return False
+        if exp < time.time():
+            del _sessions[token]
+            _save_sessions_locked()
+            return False
+        return True
+
+
+def destroy_session(token: str) -> None:
+    with _sess_lock:
+        if _sessions.pop(token, None) is not None:
+            _save_sessions_locked()
+
+
+def clear_sessions() -> None:
+    with _sess_lock:
+        _sessions.clear()
+        _save_sessions_locked()
+
+
+def make_cookie(token: str, max_age: int) -> str:
+    flags = "HttpOnly; SameSite=Strict; Path=/"
+    if CFG.get("cookie_secure", True):
+        flags += "; Secure"
+    return f"auth={token}; {flags}; Max-Age={max_age}"
 
 
 # --------------------------------------------------------------------------- #
@@ -217,15 +321,24 @@ class Handler(BaseHTTPRequestHandler):
         print(f"{self.address_string()} {fmt % args}")
 
     # -- helpers ----------------------------------------------------------- #
+    def _cookie_token(self) -> str:
+        morsel = SimpleCookie(self.headers.get("Cookie", "")).get("auth")
+        return morsel.value if morsel else ""
+
     def _is_authed(self) -> bool:
-        cookie = SimpleCookie(self.headers.get("Cookie", ""))
-        morsel = cookie.get("auth")
-        return bool(morsel) and hmac.compare_digest(morsel.value, auth_token())
+        return session_valid(self._cookie_token())
+
+    def _send_security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; frame-ancestors 'none'; base-uri 'none'")
 
     def _send(self, code: int, body: bytes, ctype: str, extra_headers=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self._send_security_headers()
         for k, v in (extra_headers or {}):
             self.send_header(k, v)
         self.end_headers()
@@ -262,6 +375,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/api/login":
             return self._login()
+        if self.path == "/api/logout":
+            return self._logout()
         if not self._is_authed():
             return self._json(401, {"error": "no autorizado"})
         if self.path == "/api/chat":
@@ -285,20 +400,25 @@ class Handler(BaseHTTPRequestHandler):
             })
 
         data = self._read_body()
-        ok_pw = hmac.compare_digest(str(data.get("password", "")), CFG["password"])
+        ok_pw = verify_password(str(data.get("password", "")))
         ok_code = True
         if CFG.get("totp_enabled"):
             ok_code = verify_totp(CFG["totp_secret"], str(data.get("code", "")))
 
         if ok_pw and ok_code:
             register_login_result(True)
-            cookie = f"auth={auth_token()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000"
+            cookie = make_cookie(create_session(), session_ttl())
             self._json(200, {"ok": True}, extra_headers=[("Set-Cookie", cookie)])
         else:
             register_login_result(False)
             time.sleep(1)  # frena el goteo de intentos
             # Mensaje genérico: no revela cuál de los dos factores falló.
             self._json(403, {"error": "credenciales incorrectas"})
+
+    def _logout(self):
+        destroy_session(self._cookie_token())  # revoca en servidor
+        expired = make_cookie("", 0)            # borra la cookie en el navegador
+        self._json(200, {"ok": True}, extra_headers=[("Set-Cookie", expired)])
 
     # -- el chat: streaming desde `claude -p` ------------------------------ #
     def _chat(self):
@@ -344,6 +464,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("X-Accel-Buffering", "no")  # desactiva buffering en nginx
+            self._send_security_headers()
             self.end_headers()
 
             def emit(ev: dict) -> bool:
@@ -411,25 +532,59 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
 
+def cmd_set_password() -> None:
+    import getpass
+    pw1 = getpass.getpass("Nueva contraseña del panel: ")
+    pw2 = getpass.getpass("Repítela: ")
+    if pw1 != pw2:
+        print("✗ No coinciden. No se ha cambiado nada.")
+        return
+    if len(pw1) < 8:
+        print("✗ Mínimo 8 caracteres. No se ha cambiado nada.")
+        return
+    CFG["password_hash"] = hash_password(pw1)
+    CFG["password"] = ""  # elimina el texto plano heredado
+    save_config(CFG)
+    clear_sessions()      # cierra todas las sesiones abiertas
+    print("✓ Contraseña actualizada (hash scrypt) y sesiones cerradas.")
+    print("  Aplícalo: sudo systemctl restart claude-panel")
+
+
+def cmd_reset_totp() -> None:
+    CFG["totp_secret"] = generate_totp_secret()
+    save_config(CFG)
+    clear_sessions()
+    print("✓ Nuevo secreto 2FA generado. Vuelve a inscribirlo:\n")
+    print_enrollment(CFG)
+    print("\n  Aplícalo: sudo systemctl restart claude-panel")
+
+
 def main():
-    # `python3 server.py --totp` reimprime la inscripción del 2FA y sale.
-    if "--totp" in sys.argv[1:]:
+    args = sys.argv[1:]
+    if "--totp" in args:            # reimprime la inscripción del 2FA y sale
         print_enrollment(CFG)
+        return
+    if "--set-password" in args:    # cambia la contraseña (interactivo, no la pide en claro)
+        cmd_set_password()
+        return
+    if "--reset-totp" in args:      # regenera el secreto 2FA
+        cmd_reset_totp()
         return
 
     if not (STATIC / "index.html").is_file():
         print(f"  ⚠ No encuentro el frontend en {STATIC}")
         print("    Clónalo/sitúalo ahí o ajusta 'staticdir' en panel.conf.")
     httpd = ThreadingHTTPServer((CFG["host"], CFG["port"]), Handler)
+    pw_mode = "hash scrypt" if CFG.get("password_hash") else f"texto plano: {CFG.get('password')}"
     print("=" * 60)
     print(f"  Panel Claude escuchando en http://{CFG['host']}:{CFG['port']}")
-    print(f"  Contraseña: {CFG['password']}")
+    print(f"  Contraseña: {pw_mode}")
     print(f"  2FA (TOTP): {'activo' if CFG.get('totp_enabled') else 'desactivado'}")
     print(f"  Frontend  : {STATIC}")
     print(f"  Workdir   : {CFG['workdir']}")
     print(f"  (config en {CONF_PATH})")
     print("=" * 60)
-    if CFG.get("totp_enabled"):
+    if CFG.get("totp_enabled") and not CFG.get("password_hash"):
         print_enrollment(CFG)
     try:
         httpd.serve_forever()

@@ -1,6 +1,6 @@
 {
-  "_comment": "Copia este fichero a panel.conf. Deja password/secret/totp_secret vacíos: se autogeneran de forma segura en el primer arranque y se reescriben con permisos 600. NO subas panel.conf a git.",
-  "password": "",
+  "_comment": "Copia este fichero a panel.conf. NO subas panel.conf a git. La contraseña se guarda HASHEADA: créala/cámbiala con 'python3 server.py --set-password' (nunca en texto plano). En el primer arranque, si no hay password_hash, se autogenera una contraseña temporal y se imprime una vez por consola.",
+  "password_hash": "",
   "secret": "",
   "totp_secret": "",
   "totp_enabled": true,
@@ -10,5 +10,8 @@
   "port": 8787,
   "staticdir": "../frontend",
   "workdir": "/home/USUARIO",
-  "model": null
+  "model": null,
+  "claude_bin": null,
+  "cookie_secure": true,
+  "session_days": 30
 }

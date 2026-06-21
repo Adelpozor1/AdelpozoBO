@@ -68,6 +68,24 @@ comando muestra un QR más compacto; si no, se dibuja uno con `qr.py`.
 Tras **5 intentos fallidos** el login se bloquea 5 minutos. Para desactivar el
 2FA (no recomendado): `"totp_enabled": false` en `panel.conf`.
 
+## Gestión del login (sin exponer secretos)
+
+La contraseña se guarda **hasheada** (scrypt), nunca en texto plano. Para
+crearla/cambiarla de forma interactiva (no se escribe en pantalla ni en logs):
+
+```bash
+python3 backend/server.py --set-password    # pide la contraseña por teclado (getpass)
+python3 backend/server.py --reset-totp       # regenera el secreto 2FA y lo reimprime
+```
+
+Ambos **cierran todas las sesiones abiertas**. Tras usarlos:
+`sudo systemctl restart claude-panel`.
+
+**Sesiones:** cada login crea un token aleatorio con caducidad (`session_days`,
+30 por defecto), guardado en `sessions.json` (revocable). El panel tiene botón
+**Salir** (logout) que invalida la sesión en el servidor. La cookie es
+`HttpOnly`, `SameSite=Strict` y `Secure` (`cookie_secure`).
+
 ## Persistencia (systemd)
 
 ```bash
@@ -83,15 +101,17 @@ JSON autogenerado en el primer arranque (permisos 600, **no se sube a git**):
 
 | Campo          | Qué es                                                    |
 |----------------|-----------------------------------------------------------|
-| `password`     | Contraseña de acceso al panel                             |
-| `secret`       | Clave para firmar la cookie de sesión (no la toques)      |
-| `totp_secret`  | Secreto base32 del 2FA (no lo toques; ver `--totp`)       |
-| `totp_enabled` | `true` = exige código 2FA en el login                     |
-| `host`         | Interfaz de escucha (por defecto `127.0.0.1`)             |
-| `port`         | Puerto (`8787`)                                           |
-| `staticdir`    | Carpeta del frontend a servir (por defecto `../frontend`) |
-| `workdir`      | Directorio donde trabaja el agente                        |
-| `model`        | `null` (usa el del CLI), o `"opus"` / `"sonnet"` / …      |
+| `password_hash` | Hash scrypt de la contraseña (gestiónalo con `--set-password`) |
+| `totp_secret`   | Secreto base32 del 2FA (no lo toques; ver `--totp`)          |
+| `totp_enabled`  | `true` = exige código 2FA en el login                       |
+| `host`          | Interfaz de escucha (por defecto `127.0.0.1`)               |
+| `port`          | Puerto (`8787`)                                             |
+| `staticdir`     | Carpeta del frontend a servir (por defecto `../frontend`)   |
+| `workdir`       | Directorio donde trabaja el agente                          |
+| `model`         | `null` (usa el del CLI), o `"opus"` / `"sonnet"` / …        |
+| `claude_bin`    | Ruta al CLI `claude` (`null` = autodetectar)                |
+| `cookie_secure` | Cookie solo por HTTPS (déjalo en `true`)                    |
+| `session_days`  | Caducidad de la sesión en días (30)                        |
 
 ## Seguridad (importante)
 

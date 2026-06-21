@@ -1,6 +1,7 @@
 # Secretos y runtime — ¡NUNCA subir!
 backend/panel.conf
 backend/panel.log
+backend/sessions.json
 
 # Caches de Python
 __pycache__/
