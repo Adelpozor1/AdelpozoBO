@@ -11,6 +11,8 @@ Wants=network-online.target
 [Service]
 User=adelpozor
 WorkingDirectory=/home/adelpozor/claude-panel/backend
+# El CLI `claude` vive en ~/.local/bin, que no está en el PATH por defecto de systemd.
+Environment=PATH=/home/adelpozor/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin:/snap/bin
 ExecStart=/usr/bin/python3 /home/adelpozor/claude-panel/backend/server.py
 Restart=on-failure
 RestartSec=3

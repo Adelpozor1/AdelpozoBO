@@ -144,6 +144,7 @@ def load_config() -> dict:
     cfg.setdefault("staticdir", str(DEFAULT_STATIC))  # carpeta del frontend
     cfg.setdefault("workdir", str(Path.home()))
     cfg.setdefault("model", None)  # p.ej. "opus", "sonnet"; None = el del CLI
+    cfg.setdefault("claude_bin", None)  # ruta al CLI; None = autodetectar
     if changed or not CONF_PATH.exists():
         CONF_PATH.write_text(json.dumps(cfg, indent=2))
         os.chmod(CONF_PATH, 0o600)
@@ -152,6 +153,24 @@ def load_config() -> dict:
 
 CFG = load_config()
 STATIC = Path(CFG["staticdir"]).resolve()
+
+
+def resolve_claude_bin() -> str:
+    """Ruta absoluta al CLI `claude`. Como servicio systemd el PATH es mínimo y
+    no incluye ~/.local/bin, así que lo buscamos a mano."""
+    cand = CFG.get("claude_bin")
+    if cand and Path(cand).exists():
+        return cand
+    found = shutil.which("claude")
+    if found:
+        return found
+    for p in (Path.home() / ".local/bin/claude", Path("/usr/local/bin/claude")):
+        if p.exists():
+            return str(p)
+    return "claude"  # último recurso (dará un error claro al usarlo)
+
+
+CLAUDE_BIN = resolve_claude_bin()
 
 # Solo una conversación de Claude a la vez (es un panel personal).
 _chat_lock = threading.Lock()
@@ -294,7 +313,7 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             cmd = [
-                "claude", "-p",
+                CLAUDE_BIN, "-p",
                 "--output-format", "stream-json",
                 "--verbose",
                 "--dangerously-skip-permissions",  # agéntico completo, sin confirmaciones
@@ -304,15 +323,19 @@ class Handler(BaseHTTPRequestHandler):
             if CFG.get("model"):
                 cmd += ["--model", CFG["model"]]
 
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=CFG["workdir"],
-                text=True,
-                bufsize=1,
-            )
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=CFG["workdir"],
+                    text=True,
+                    bufsize=1,
+                )
+            except FileNotFoundError:
+                return self._json(500, {"error": f"no encuentro el CLI 'claude' ({CLAUDE_BIN}); "
+                                                 "revisa 'claude_bin' en panel.conf o el PATH del servicio"})
             proc.stdin.write(message)
             proc.stdin.close()
 
