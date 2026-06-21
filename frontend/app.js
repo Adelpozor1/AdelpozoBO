@@ -163,7 +163,7 @@ function selectProject(name) {
   $("#projName").textContent = name;
   refreshProjbar();
   renderProjectList();
-  renderConvoSel();
+  renderConvoList();
   renderLog();
   loadBranches(name);
   updateInputState();
@@ -175,34 +175,60 @@ function refreshProjbar() {
   $("#projBranch").textContent = p && p.branch ? p.branch : "";
 }
 
-// ---- conversaciones ----
-function renderConvoSel() {
-  const sel = $("#convoSel"); sel.innerHTML = "";
-  if (!current) return;
+// ---- conversaciones (panel lateral, según el proyecto abierto) ----
+function renderConvoList() {
+  const ul = $("#convoList"); ul.innerHTML = "";
+  if (!current) { ul.innerHTML = '<li class="convo-empty">Abre un proyecto.</li>'; return; }
   const s = st(current);
   s.convos.forEach((c, i) => {
-    const o = document.createElement("option");
-    o.value = c.id; o.textContent = c.title || ("Conversación " + (i + 1));
-    if (c.id === s.activeId) o.selected = true;
-    sel.appendChild(o);
+    const li = document.createElement("li");
+    li.className = "convo" + (c.id === s.activeId ? " active" : "");
+    const t = document.createElement("span");
+    t.className = "ctitle"; t.textContent = c.title || ("Conversación " + (i + 1));
+    const del = document.createElement("button");
+    del.className = "cdel"; del.textContent = "×"; del.title = "Borrar conversación";
+    del.onclick = ev => { ev.stopPropagation(); deleteConvo(c.id); };
+    li.appendChild(t); li.appendChild(del);
+    li.onclick = () => switchConvo(c.id);
+    ul.appendChild(li);
   });
 }
-$("#convoSel").onchange = e => {
+function switchConvo(id) {
   if (!current) return;
-  st(current).activeId = e.target.value;
+  st(current).activeId = id;
   saveConvos(current);
-  renderLog();
-  updateInputState();
+  renderConvoList(); renderLog(); updateInputState();
+  if (window.matchMedia("(max-width:640px)").matches) $("#main-row").classList.remove("convo-open");
   $("#input").focus();
-};
-$("#newBtn").onclick = () => {
+}
+function deleteConvo(id) {
   if (!current) return;
+  const s = st(current);
+  if (s.convos.length <= 1) {                 // siempre debe quedar una: la vaciamos
+    const c = s.convos[0];
+    c.entries = []; c.sessionId = null; c.title = "Conversación";
+    saveConvos(current); renderConvoList(); renderLog(); return;
+  }
+  if (!confirm("¿Borrar esta conversación?")) return;
+  const idx = s.convos.findIndex(c => c.id === id);
+  s.convos.splice(idx, 1);
+  if (s.activeId === id) s.activeId = s.convos[Math.max(0, idx - 1)].id;
+  saveConvos(current);
+  renderConvoList(); renderLog(); updateInputState();
+}
+$("#newConvoBtn").onclick = () => {
+  if (!current) { alert("Selecciona un proyecto primero."); return; }
   const s = st(current);
   const c = newConvoObj();
   s.convos.push(c); s.activeId = c.id;
   saveConvos(current);
-  renderConvoSel(); renderLog(); updateInputState();
+  renderConvoList(); renderLog(); updateInputState();
   $("#input").focus();
+};
+$("#convoToggle").onclick = () => {
+  const mr = $("#main-row");
+  if (window.matchMedia("(max-width:640px)").matches) mr.classList.toggle("convo-open");
+  else mr.classList.toggle("convo-collapsed");
 };
 
 // ---- git ----
@@ -316,7 +342,7 @@ async function send() {
   input.value = "";
   const convo = activeConvo(name);
   if (convo.title === "Conversación" && !convo.entries.length) {
-    convo.title = text.slice(0, 32); saveConvos(name); renderConvoSel();
+    convo.title = text.slice(0, 32); saveConvos(name); renderConvoList();
   }
   pushTo(name, convo, {t: "user", text});
   setBusy(name, true);

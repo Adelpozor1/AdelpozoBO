@@ -41,13 +41,20 @@
       <ul id="projList"></ul>
     </aside>
 
+    <aside id="convo-panel">
+      <div class="side-head">
+        <span>Conversaciones</span>
+        <button id="newConvoBtn" title="Nueva conversación">+ Nueva</button>
+      </div>
+      <ul id="convoList"></ul>
+    </aside>
+
     <div id="chat-col">
       <div id="projbar" class="hidden">
+        <button id="convoToggle" title="Mostrar/ocultar conversaciones">☰</button>
         <b id="projName">—</b>
         <span id="projBranch" class="badge"></span>
         <span class="spacer"></span>
-        <select id="convoSel" title="Conversación"></select>
-        <button id="newBtn" title="Nueva conversación">+ Chat</button>
         <select id="branchSel" title="Cambiar de rama"></select>
         <button id="pullBtn">Pull</button>
         <button id="delBtn" class="danger">Borrar</button>

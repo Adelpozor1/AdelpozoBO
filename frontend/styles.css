@@ -122,6 +122,25 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .proj .dirty { color: var(--accent); }
 @keyframes pulse { 0%,100% { opacity: .25 } 50% { opacity: 1 } }
 
+/* panel de conversaciones (cambia según el proyecto abierto; colapsable) */
+#convo-panel { width: 210px; flex-shrink: 0; background: var(--panel);
+               border-right: 1px solid var(--border); overflow-y: auto;
+               display: flex; flex-direction: column; }
+#main-row.convo-collapsed #convo-panel { display: none; }
+#newConvoBtn { background: var(--accent); border: none; color: #1a1109; font-weight: 600;
+               border-radius: 6px; padding: 5px 9px; cursor: pointer; font-size: 12px; }
+#convoList { list-style: none; margin: 0; padding: 6px; }
+.convo { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 8px;
+         cursor: pointer; margin-bottom: 2px; font-size: 13px; }
+.convo:hover { background: var(--tool); }
+.convo.active { background: var(--tool); outline: 1px solid var(--border); }
+.convo .ctitle { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convo .cdel { color: var(--muted); border: none; background: transparent; cursor: pointer;
+               font-size: 15px; line-height: 1; padding: 0 2px; }
+.convo .cdel:hover { color: #f85149; }
+.convo-empty { color: var(--muted); font-size: 12px; padding: 10px; }
+#convoToggle { font-size: 14px; }
+
 #chat-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #projbar { display: flex; align-items: center; gap: 8px; padding: 8px 14px;
            border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; }
@@ -158,5 +177,11 @@ textarea:focus { outline: none; border-color: var(--accent); }
   #sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 30; width: 80%;
              max-width: 280px; transform: translateX(-100%); transition: transform .2s; }
   #main-row.side-open #sidebar { transform: translateX(0);
+             box-shadow: 0 0 0 100vw rgba(0,0,0,.5); }
+  /* conversaciones: cajón deslizante (manda el drawer, no el colapso) */
+  #convo-panel { position: fixed; top: 0; left: 0; bottom: 0; z-index: 31; width: 75%;
+             max-width: 260px; transform: translateX(-100%); transition: transform .2s; }
+  #main-row.convo-collapsed #convo-panel { display: flex; }
+  #main-row.convo-open #convo-panel { transform: translateX(0);
              box-shadow: 0 0 0 100vw rgba(0,0,0,.5); }
 }
