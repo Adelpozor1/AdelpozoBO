@@ -22,6 +22,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import shutil
 import struct
@@ -147,6 +148,7 @@ def load_config() -> dict:
     cfg.setdefault("claude_bin", None)  # ruta al CLI; None = autodetectar
     cfg.setdefault("cookie_secure", True)  # cookie solo por HTTPS (Tailscale serve)
     cfg.setdefault("session_days", 30)     # caducidad de la sesión
+    cfg.setdefault("projects_dir", str(Path.home() / "projects"))  # zona de desarrollo
     if changed or not CONF_PATH.exists():
         CONF_PATH.write_text(json.dumps(cfg, indent=2))
         os.chmod(CONF_PATH, 0o600)
@@ -180,8 +182,65 @@ def resolve_claude_bin() -> str:
 
 CLAUDE_BIN = resolve_claude_bin()
 
-# Solo una conversación de Claude a la vez (es un panel personal).
-_chat_lock = threading.Lock()
+
+# --------------------------------------------------------------------------- #
+# Zona de desarrollo: cada proyecto es una subcarpeta de PROJECTS (un git clone).
+# Claude trabaja con cwd dentro del proyecto; varios proyectos pueden correr a la
+# vez (un lock por proyecto, no global).
+# --------------------------------------------------------------------------- #
+PROJECTS = Path(CFG["projects_dir"]).resolve()
+
+GIT_ENV = {
+    **os.environ,
+    "GIT_TERMINAL_PROMPT": "0",  # nunca pedir credenciales (colgaría)
+    "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+}
+
+
+def run_git(args: list[str], cwd=None, timeout: int = 300):
+    try:
+        p = subprocess.run(["git", *args], cwd=cwd, env=GIT_ENV,
+                           capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", "tiempo de espera agotado"
+    except FileNotFoundError:
+        return 127, "", "git no está instalado"
+
+
+def valid_name(name: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", name or "")) and ".." not in name
+
+
+def project_path(name: str, must_exist: bool = True):
+    """Ruta segura de un proyecto (hijo directo de PROJECTS). None si inválida."""
+    if not valid_name(name):
+        return None
+    p = (PROJECTS / name).resolve()
+    if p.parent != PROJECTS:
+        return None
+    if must_exist and not p.is_dir():
+        return None
+    return p
+
+
+def name_from_url(url: str) -> str:
+    base = url.rstrip("/").split("/")[-1]
+    if base.endswith(".git"):
+        base = base[:-4]
+    base = re.sub(r"[^A-Za-z0-9._-]", "-", base).strip("-.") or "repo"
+    return base
+
+
+# Un lock por proyecto: permite varios proyectos en paralelo, pero solo un
+# turno de Claude a la vez dentro de cada uno (evita --resume concurrente).
+_locks_guard = threading.Lock()
+_proj_locks: dict = {}
+
+
+def project_lock(name: str) -> threading.Lock:
+    with _locks_guard:
+        return _proj_locks.setdefault(name, threading.Lock())
 
 # Anti-fuerza-bruta del login: tras varios fallos, bloqueo temporal.
 _login_lock = threading.Lock()
@@ -361,13 +420,22 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- GET --------------------------------------------------------------- #
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        path = urllib.parse.urlsplit(self.path).path
+        if path in ("/", "/index.html"):
             self._serve_static("index.html")
-        elif self.path.startswith("/static/"):
-            self._serve_static(self.path[len("/static/") :])
-        elif self.path == "/api/whoami":
+        elif path.startswith("/static/"):
+            self._serve_static(path[len("/static/") :])
+        elif path == "/api/whoami":
             self._json(200, {"authed": self._is_authed(),
                              "totp": bool(CFG.get("totp_enabled"))})
+        elif path == "/api/projects":
+            if not self._is_authed():
+                return self._json(401, {"error": "no autorizado"})
+            self._projects_list()
+        elif path == "/api/projects/branches":
+            if not self._is_authed():
+                return self._json(401, {"error": "no autorizado"})
+            self._project_branches()
         else:
             self._send(404, b"not found", "text/plain")
 
@@ -385,6 +453,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._change_password()
         if self.path == "/api/account/totp/reset":
             return self._reset_totp_web()
+        if self.path == "/api/projects/clone":
+            return self._project_clone()
+        if self.path == "/api/projects/pull":
+            return self._project_pull()
+        if self.path == "/api/projects/checkout":
+            return self._project_checkout()
+        if self.path == "/api/projects/delete":
+            return self._project_delete()
         self._json(404, {"error": "ruta desconocida"})
 
     def _read_body(self) -> dict:
@@ -460,16 +536,101 @@ class Handler(BaseHTTPRequestHandler):
             svg = ""
         self._json(200, {"ok": True, "secret": CFG["totp_secret"], "uri": uri, "svg": svg})
 
-    # -- el chat: streaming desde `claude -p` ------------------------------ #
+    # -- proyectos (zona de desarrollo) ------------------------------------ #
+    def _project_info(self, d: Path) -> dict:
+        info = {"name": d.name, "git": (d / ".git").exists(),
+                "branch": "", "dirty": False, "remote": "", "last": ""}
+        if info["git"]:
+            _, branch, _ = run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=d, timeout=15)
+            _, status, _ = run_git(["status", "--porcelain"], cwd=d, timeout=15)
+            _, remote, _ = run_git(["remote", "get-url", "origin"], cwd=d, timeout=15)
+            _, last, _ = run_git(["log", "-1", "--pretty=%h %s"], cwd=d, timeout=15)
+            info.update(branch=branch.strip(), dirty=bool(status.strip()),
+                        remote=remote.strip(), last=last.strip())
+        return info
+
+    def _projects_list(self):
+        items = []
+        if PROJECTS.is_dir():
+            for d in sorted(PROJECTS.iterdir()):
+                if d.is_dir():
+                    items.append(self._project_info(d))
+        self._json(200, {"projects": items})
+
+    def _project_branches(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        p = project_path(q.get("name", [""])[0])
+        if not p:
+            return self._json(400, {"error": "proyecto no válido"})
+        _, cur, _ = run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=p, timeout=15)
+        _, out, _ = run_git(["branch", "-a", "--format=%(refname:short)"], cwd=p, timeout=15)
+        branches = sorted({b.strip() for b in out.splitlines() if b.strip() and "HEAD" not in b})
+        self._json(200, {"current": cur.strip(), "branches": branches})
+
+    def _project_clone(self):
+        data = self._read_body()
+        url = str(data.get("url", "")).strip()
+        if not url or not re.match(r"^(https://|git@|ssh://)", url):
+            return self._json(400, {"error": "URL git no válida (usa https:// o git@…)"})
+        name = str(data.get("name") or name_from_url(url))
+        target = project_path(name, must_exist=False)
+        if target is None:
+            return self._json(400, {"error": "nombre de proyecto no válido"})
+        if target.exists():
+            return self._json(409, {"error": f"ya existe un proyecto '{name}'"})
+        PROJECTS.mkdir(parents=True, exist_ok=True)
+        code, out, err = run_git(["clone", url, name], cwd=PROJECTS, timeout=600)
+        if code != 0:
+            return self._json(500, {"error": (err or out or "fallo al clonar").strip()[:800]})
+        self._json(200, {"ok": True, "name": name, "info": self._project_info(target)})
+
+    def _project_pull(self):
+        p = project_path(str(self._read_body().get("name", "")))
+        if not p:
+            return self._json(400, {"error": "proyecto no válido"})
+        code, out, err = run_git(["pull", "--ff-only"], cwd=p, timeout=180)
+        msg = (out + err).strip()
+        if code != 0:
+            return self._json(500, {"error": msg[:800] or "fallo en git pull"})
+        self._json(200, {"ok": True, "output": msg[:800], "info": self._project_info(p)})
+
+    def _project_checkout(self):
+        data = self._read_body()
+        p = project_path(str(data.get("name", "")))
+        branch = str(data.get("branch", "")).strip()
+        if not p:
+            return self._json(400, {"error": "proyecto no válido"})
+        if not re.fullmatch(r"[A-Za-z0-9._/-]{1,120}", branch):
+            return self._json(400, {"error": "rama no válida"})
+        code, out, err = run_git(["checkout", branch], cwd=p, timeout=60)
+        if code != 0:
+            return self._json(500, {"error": (err or out).strip()[:800]})
+        self._json(200, {"ok": True, "info": self._project_info(p)})
+
+    def _project_delete(self):
+        p = project_path(str(self._read_body().get("name", "")))
+        if not p:
+            return self._json(400, {"error": "proyecto no válido"})
+        try:
+            shutil.rmtree(p)
+        except Exception as exc:
+            return self._json(500, {"error": f"no se pudo borrar: {exc}"})
+        self._json(200, {"ok": True})
+
+    # -- el chat: streaming desde `claude -p` (cwd = proyecto) -------------- #
     def _chat(self):
         data = self._read_body()
         message = str(data.get("message", "")).strip()
         session_id = data.get("session_id") or None
+        proj = project_path(str(data.get("project", "")))
+        if proj is None:
+            return self._json(400, {"error": "proyecto no válido o no seleccionado"})
         if not message:
             return self._json(400, {"error": "mensaje vacío"})
 
-        if not _chat_lock.acquire(blocking=False):
-            return self._json(409, {"error": "ocupado: ya hay una respuesta en curso"})
+        lock = project_lock(proj.name)  # uno por proyecto -> varios en paralelo
+        if not lock.acquire(blocking=False):
+            return self._json(409, {"error": f"'{proj.name}' ya tiene una respuesta en curso"})
 
         try:
             cmd = [
@@ -489,7 +650,7 @@ class Handler(BaseHTTPRequestHandler):
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    cwd=CFG["workdir"],
+                    cwd=str(proj),
                     text=True,
                     bufsize=1,
                 )
@@ -532,7 +693,7 @@ class Handler(BaseHTTPRequestHandler):
             if proc.returncode not in (0, None) and err:
                 emit({"type": "error", "text": err.strip()[:1000]})
         finally:
-            _chat_lock.release()
+            lock.release()
 
     @staticmethod
     def _map_event(ev: dict, emit) -> bool:
@@ -614,6 +775,7 @@ def main():
     if not (STATIC / "index.html").is_file():
         print(f"  ⚠ No encuentro el frontend en {STATIC}")
         print("    Clónalo/sitúalo ahí o ajusta 'staticdir' en panel.conf.")
+    PROJECTS.mkdir(parents=True, exist_ok=True)  # zona de desarrollo
     httpd = ThreadingHTTPServer((CFG["host"], CFG["port"]), Handler)
     pw_mode = "hash scrypt" if CFG.get("password_hash") else f"texto plano: {CFG.get('password')}"
     print("=" * 60)
@@ -621,7 +783,7 @@ def main():
     print(f"  Contraseña: {pw_mode}")
     print(f"  2FA (TOTP): {'activo' if CFG.get('totp_enabled') else 'desactivado'}")
     print(f"  Frontend  : {STATIC}")
-    print(f"  Workdir   : {CFG['workdir']}")
+    print(f"  Proyectos : {PROJECTS}")
     print(f"  (config en {CONF_PATH})")
     print("=" * 60)
     if CFG.get("totp_enabled") and not CFG.get("password_hash"):

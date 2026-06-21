@@ -23,11 +23,54 @@
     <span class="dot"></span><b>Claude</b>
     <span class="meta" id="status">listo</span>
     <span class="spacer"></span>
-    <button id="newBtn">Nueva conversación</button>
+    <button id="menuBtn" title="Proyectos">☰</button>
     <button id="profileBtn">Perfil</button>
     <button id="logoutBtn">Salir</button>
   </header>
 
+  <div id="main-row" class="hidden">
+    <aside id="sidebar">
+      <div class="side-head">
+        <span>Proyectos</span>
+        <button id="cloneBtn" title="Clonar repositorio">+ Clonar</button>
+      </div>
+      <ul id="projList"></ul>
+    </aside>
+
+    <div id="chat-col">
+      <div id="projbar" class="hidden">
+        <b id="projName">—</b>
+        <span id="projBranch" class="badge"></span>
+        <span class="spacer"></span>
+        <select id="branchSel" title="Cambiar de rama"></select>
+        <button id="pullBtn">Pull</button>
+        <button id="newBtn">Nueva</button>
+        <button id="delBtn" class="danger">Borrar</button>
+      </div>
+      <div id="log"></div>
+      <footer id="app-footer">
+        <div class="inputrow">
+          <textarea id="input" placeholder="Selecciona un proyecto y escribe…"></textarea>
+          <button class="send" id="sendBtn">Enviar</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Modal: clonar repositorio -->
+  <div id="clone" class="hidden">
+    <div class="card">
+      <h1>Clonar repositorio</h1>
+      <p>Pega la URL del repo (SSH para privados: <code>git@…</code>).</p>
+      <input id="cloneUrl" type="text" placeholder="https://… o git@github.com:usuario/repo.git">
+      <input id="cloneName" type="text" placeholder="Nombre de carpeta (opcional)">
+      <button id="doCloneBtn">Clonar</button>
+      <button id="cancelCloneBtn" class="secondary">Cancelar</button>
+      <div class="err" id="cloneMsg"></div>
+    </div>
+  </div>
+
+  <!-- Modal: perfil -->
   <div id="profile" class="hidden">
     <div class="card">
       <h1>Perfil</h1>
@@ -53,15 +96,6 @@
       <button id="cancelPwBtn" class="secondary">Cerrar</button>
     </div>
   </div>
-
-  <div id="log" class="hidden"></div>
-
-  <footer class="hidden" id="app-footer">
-    <div class="inputrow">
-      <textarea id="input" placeholder="Escribe… (Enter envía, Shift+Enter salto de línea)"></textarea>
-      <button class="send" id="sendBtn">Enviar</button>
-    </div>
-  </footer>
 
   <script src="/static/app.js"></script>
 </body>

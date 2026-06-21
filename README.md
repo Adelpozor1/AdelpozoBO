@@ -86,6 +86,24 @@ Ambos **cierran todas las sesiones abiertas**. Tras usarlos:
 **Salir** (logout) que invalida la sesión en el servidor. La cookie es
 `HttpOnly`, `SameSite=Strict` y `Secure` (`cookie_secure`).
 
+## Zona de desarrollo (proyectos)
+
+Cada proyecto es una subcarpeta de `projects_dir` (`~/projects` por defecto), un
+`git clone`. Desde la web (barra lateral):
+
+- **+ Clonar**: pega una URL git (SSH `git@…` para repos privados — la clave de
+  la VPS está en tu cuenta de GitHub, así que clona tus privados).
+- Selecciona un proyecto → el chat de Claude trabaja **dentro de esa carpeta**
+  (`cwd` = proyecto), con sesión propia.
+- Barra del proyecto: **Pull**, cambiar de **rama**, **Nueva** (reinicia la
+  conversación) y **Borrar**.
+- **Varios proyectos en paralelo**: cada uno tiene su lock; puedes lanzar Claude
+  en uno y, mientras trabaja, cambiar a otro.
+
+Claude corre con `--dangerously-skip-permissions` también aquí (autonomía total
+dentro del proyecto). API: `GET /api/projects`, `POST /api/projects/{clone,pull,
+checkout,delete}`, `GET /api/projects/branches`.
+
 ## Persistencia (systemd)
 
 ```bash
@@ -112,6 +130,7 @@ JSON autogenerado en el primer arranque (permisos 600, **no se sube a git**):
 | `claude_bin`    | Ruta al CLI `claude` (`null` = autodetectar)                |
 | `cookie_secure` | Cookie solo por HTTPS (déjalo en `true`)                    |
 | `session_days`  | Caducidad de la sesión en días (30)                        |
+| `projects_dir`  | Carpeta de proyectos de desarrollo (`~/projects`)          |
 
 ## Seguridad (importante)
 
