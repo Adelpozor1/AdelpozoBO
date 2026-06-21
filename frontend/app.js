@@ -195,12 +195,22 @@ async function openProject(name) {
   showDev("repos");
   enterReposView();
 }
-$("#backToProjects").onclick = () => { current = null; loadProjects(); showDev("projects"); };
+function setCrumb() {
+  $("#crumb").innerHTML =
+    `<a data-nav="clients">Clientes</a><span class="sep">›</span>` +
+    `<a data-nav="projects">${esc(selClient)}</a><span class="sep">›</span>` +
+    `<span class="cur">${esc(selProject)}</span>`;
+}
+$("#crumb").addEventListener("click", e => {
+  const nav = e.target.dataset.nav;
+  if (nav === "clients") { loadClients(); showDev("clients"); }
+  else if (nav === "projects") { current = null; loadProjects(); showDev("projects"); }
+});
 
 // ---- repos (workspace de desarrollo) ----
 function enterReposView() {
   $("#projbar").classList.remove("hidden");
-  $("#crumb").textContent = `${selClient} / ${selProject}`;
+  setCrumb();
   if (!current) {
     $("#projName").textContent = "—";
     ["#projBranch", "#branchSel", "#pullBtn", "#renameBtn", "#delBtn", "#convoToggle"].forEach(id => $(id).classList.add("hidden"));
