@@ -85,6 +85,27 @@ textarea:focus { outline: none; border-color: var(--accent); }
 #login .err, #profile .err { margin-top: 10px; min-height: 18px; }
 .hidden { display: none !important; }
 
+/* pantallas de selección (clientes / proyectos) */
+.screen { flex: 1; overflow-y: auto; padding: 24px; }
+.screen-head { display: flex; align-items: center; gap: 12px; max-width: 920px; margin: 0 auto 18px; }
+.screen-head h2 { margin: 0; flex: 1; font-size: 20px; }
+.screen-head button:not(.ghost) { background: var(--accent); border: none; color: #1a1109;
+       font-weight: 600; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+button.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted);
+       border-radius: 6px; padding: 5px 10px; cursor: pointer; font-size: 13px; }
+button.ghost:hover { color: var(--text); border-color: var(--muted); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px;
+        max-width: 920px; margin: 0 auto; }
+.card-item { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+             padding: 16px; cursor: pointer; position: relative; }
+.card-item:hover { border-color: var(--muted); }
+.card-item h3 { margin: 0 0 4px; font-size: 15px; word-break: break-word; }
+.card-item .ci-meta { font-size: 12px; color: var(--muted); }
+.card-item .ci-del { position: absolute; top: 6px; right: 8px; background: transparent;
+             border: none; color: var(--muted); cursor: pointer; font-size: 16px; opacity: .55; }
+.card-item .ci-del:hover { color: #f85149; opacity: 1; }
+.grid-empty { color: var(--muted); grid-column: 1/-1; padding: 8px; }
+
 /* pestañas de sección (Desarrollo / Monitorización) */
 #sections { display: flex; gap: 4px; margin-left: 6px; }
 .tab { background: transparent; border: 1px solid transparent; color: var(--muted);

@@ -32,10 +32,27 @@
     <button id="logoutBtn">Salir</button>
   </header>
 
+  <div id="clients-view" class="screen hidden">
+    <div class="screen-head">
+      <h2>Clientes</h2>
+      <button id="newClientBtn">+ Nuevo cliente</button>
+    </div>
+    <div id="clientGrid" class="grid"></div>
+  </div>
+
+  <div id="projects-view" class="screen hidden">
+    <div class="screen-head">
+      <button id="backToClients" class="ghost">← Clientes</button>
+      <h2 id="projectsTitle">Proyectos</h2>
+      <button id="newProjectBtn">+ Nuevo proyecto</button>
+    </div>
+    <div id="projectGrid" class="grid"></div>
+  </div>
+
   <div id="main-row" class="hidden">
     <aside id="sidebar">
       <div class="side-head">
-        <span>Proyectos</span>
+        <span>Repositorios</span>
         <button id="cloneBtn" title="Clonar repositorio">+ Clonar</button>
       </div>
       <ul id="projList"></ul>
@@ -52,6 +69,8 @@
     <div id="chat-col">
       <div id="projbar" class="hidden">
         <button id="convoToggle" title="Mostrar/ocultar conversaciones">☰</button>
+        <button id="backToProjects" class="ghost" title="Cambiar de proyecto">←</button>
+        <span id="crumb" class="badge"></span>
         <b id="projName">—</b>
         <span id="projBranch" class="badge"></span>
         <span class="spacer"></span>

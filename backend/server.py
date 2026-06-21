@@ -223,16 +223,37 @@ def valid_name(name: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", name or "")) and ".." not in name
 
 
-def project_path(name: str, must_exist: bool = True):
-    """Ruta segura de un proyecto (hijo directo de PROJECTS). None si inválida."""
-    if not valid_name(name):
+def safe_join(*segs, must_exist: bool = True):
+    """Ruta segura a profundidad len(segs) bajo PROJECTS. None si inválida.
+    Jerarquía: <cliente>/<proyecto>/<repo>."""
+    if not segs or not all(valid_name(s) for s in segs):
         return None
-    p = (PROJECTS / name).resolve()
-    if p.parent != PROJECTS:
+    p = PROJECTS.joinpath(*segs).resolve()
+    try:
+        rel = p.relative_to(PROJECTS)
+    except ValueError:
+        return None
+    if len(rel.parts) != len(segs):
         return None
     if must_exist and not p.is_dir():
         return None
     return p
+
+
+def client_path(c, must_exist=True):
+    return safe_join(c, must_exist=must_exist)
+
+
+def project_path(c, p, must_exist=True):
+    return safe_join(c, p, must_exist=must_exist)
+
+
+def repo_path(c, p, r, must_exist=True):
+    return safe_join(c, p, r, must_exist=must_exist)
+
+
+def list_subdirs(base) -> list:
+    return sorted(d.name for d in base.iterdir() if d.is_dir()) if base.is_dir() else []
 
 
 def name_from_url(url: str) -> str:
@@ -442,14 +463,19 @@ class Handler(BaseHTTPRequestHandler):
             if authed:
                 resp["github_token_set"] = bool(CFG.get("github_token"))
             self._json(200, resp)
-        elif path == "/api/projects":
+        elif path in ("/api/clients", "/api/projects", "/api/repos", "/api/repos/branches"):
             if not self._is_authed():
                 return self._json(401, {"error": "no autorizado"})
-            self._projects_list()
-        elif path == "/api/projects/branches":
-            if not self._is_authed():
-                return self._json(401, {"error": "no autorizado"})
-            self._project_branches()
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            if path == "/api/clients":
+                self._clients()
+            elif path == "/api/projects":
+                self._projects_of(q.get("client", [""])[0])
+            elif path == "/api/repos":
+                self._repos_of(q.get("client", [""])[0], q.get("project", [""])[0])
+            else:
+                self._repo_branches(q.get("client", [""])[0], q.get("project", [""])[0],
+                                    q.get("name", [""])[0])
         else:
             self._send(404, b"not found", "text/plain")
 
@@ -469,14 +495,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._reset_totp_web()
         if self.path == "/api/account/github-token":
             return self._set_github_token()
-        if self.path == "/api/projects/clone":
-            return self._project_clone()
-        if self.path == "/api/projects/pull":
-            return self._project_pull()
-        if self.path == "/api/projects/checkout":
-            return self._project_checkout()
-        if self.path == "/api/projects/delete":
-            return self._project_delete()
+        routes = {
+            "/api/clients/create": self._client_create,
+            "/api/clients/delete": self._client_delete,
+            "/api/projects/create": self._project_create,
+            "/api/projects/delete": self._project_delete,
+            "/api/repos/clone": self._repo_clone,
+            "/api/repos/pull": self._repo_pull,
+            "/api/repos/checkout": self._repo_checkout,
+            "/api/repos/delete": self._repo_delete,
+        }
+        if self.path in routes:
+            return routes[self.path]()
         self._json(404, {"error": "ruta desconocida"})
 
     def _read_body(self) -> dict:
@@ -560,8 +590,8 @@ class Handler(BaseHTTPRequestHandler):
         save_config(CFG)
         self._json(200, {"ok": True, "set": bool(tok)})
 
-    # -- proyectos (zona de desarrollo) ------------------------------------ #
-    def _project_info(self, d: Path) -> dict:
+    # -- jerarquía: clientes / proyectos / repos --------------------------- #
+    def _repo_info(self, d: Path) -> dict:
         info = {"name": d.name, "git": (d / ".git").exists(),
                 "branch": "", "dirty": False, "remote": "", "last": ""}
         if info["git"]:
@@ -573,86 +603,150 @@ class Handler(BaseHTTPRequestHandler):
                         remote=remote.strip(), last=last.strip())
         return info
 
-    def _projects_list(self):
-        items = []
-        if PROJECTS.is_dir():
-            for d in sorted(PROJECTS.iterdir()):
-                if d.is_dir():
-                    items.append(self._project_info(d))
-        self._json(200, {"projects": items})
+    # clientes
+    def _clients(self):
+        items = [{"name": c, "projects": len(list_subdirs(PROJECTS / c))}
+                 for c in list_subdirs(PROJECTS)]
+        self._json(200, {"clients": items})
 
-    def _project_branches(self):
-        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-        p = project_path(q.get("name", [""])[0])
-        if not p:
-            return self._json(400, {"error": "proyecto no válido"})
-        _, cur, _ = run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=p, timeout=15)
-        _, out, _ = run_git(["branch", "-a", "--format=%(refname:short)"], cwd=p, timeout=15)
-        branches = sorted({b.strip() for b in out.splitlines() if b.strip() and "HEAD" not in b})
-        self._json(200, {"current": cur.strip(), "branches": branches})
+    def _client_create(self):
+        name = str(self._read_body().get("name", "")).strip()
+        cp = client_path(name, must_exist=False)
+        if cp is None:
+            return self._json(400, {"error": "nombre de cliente no válido"})
+        if cp.exists():
+            return self._json(409, {"error": f"ya existe el cliente '{name}'"})
+        cp.mkdir(parents=True)
+        self._json(200, {"ok": True, "name": name})
 
-    def _project_clone(self):
-        data = self._read_body()
-        url = str(data.get("url", "")).strip()
-        if not url or not re.match(r"^(https://|git@|ssh://)", url):
-            return self._json(400, {"error": "URL git no válida (usa https:// o git@…)"})
-        name = str(data.get("name") or name_from_url(url))
-        target = project_path(name, must_exist=False)
-        if target is None:
-            return self._json(400, {"error": "nombre de proyecto no válido"})
-        if target.exists():
-            return self._json(409, {"error": f"ya existe un proyecto '{name}'"})
-        PROJECTS.mkdir(parents=True, exist_ok=True)
-        code, out, err = run_git(["clone", url, name], cwd=PROJECTS, timeout=600)
-        if code != 0:
-            return self._json(500, {"error": (err or out or "fallo al clonar").strip()[:800]})
-        self._json(200, {"ok": True, "name": name, "info": self._project_info(target)})
-
-    def _project_pull(self):
-        p = project_path(str(self._read_body().get("name", "")))
-        if not p:
-            return self._json(400, {"error": "proyecto no válido"})
-        code, out, err = run_git(["pull", "--ff-only"], cwd=p, timeout=180)
-        msg = (out + err).strip()
-        if code != 0:
-            return self._json(500, {"error": msg[:800] or "fallo en git pull"})
-        self._json(200, {"ok": True, "output": msg[:800], "info": self._project_info(p)})
-
-    def _project_checkout(self):
-        data = self._read_body()
-        p = project_path(str(data.get("name", "")))
-        branch = str(data.get("branch", "")).strip()
-        if not p:
-            return self._json(400, {"error": "proyecto no válido"})
-        if not re.fullmatch(r"[A-Za-z0-9._/-]{1,120}", branch):
-            return self._json(400, {"error": "rama no válida"})
-        code, out, err = run_git(["checkout", branch], cwd=p, timeout=60)
-        if code != 0:
-            return self._json(500, {"error": (err or out).strip()[:800]})
-        self._json(200, {"ok": True, "info": self._project_info(p)})
-
-    def _project_delete(self):
-        p = project_path(str(self._read_body().get("name", "")))
-        if not p:
-            return self._json(400, {"error": "proyecto no válido"})
+    def _client_delete(self):
+        cp = client_path(str(self._read_body().get("name", "")))
+        if not cp:
+            return self._json(400, {"error": "cliente no válido"})
         try:
-            shutil.rmtree(p)
+            shutil.rmtree(cp)
         except Exception as exc:
             return self._json(500, {"error": f"no se pudo borrar: {exc}"})
         self._json(200, {"ok": True})
 
-    # -- el chat: streaming desde `claude -p` (cwd = proyecto) -------------- #
+    # proyectos (dentro de un cliente)
+    def _projects_of(self, client):
+        cp = client_path(client)
+        if not cp:
+            return self._json(400, {"error": "cliente no válido"})
+        items = [{"name": p, "repos": len(list_subdirs(cp / p))} for p in list_subdirs(cp)]
+        self._json(200, {"projects": items})
+
+    def _project_create(self):
+        data = self._read_body()
+        cp = client_path(str(data.get("client", "")))
+        if not cp:
+            return self._json(400, {"error": "cliente no válido"})
+        name = str(data.get("name", "")).strip()
+        pp = project_path(cp.name, name, must_exist=False)
+        if pp is None:
+            return self._json(400, {"error": "nombre de proyecto no válido"})
+        if pp.exists():
+            return self._json(409, {"error": f"ya existe el proyecto '{name}'"})
+        pp.mkdir(parents=True)
+        self._json(200, {"ok": True, "name": name})
+
+    def _project_delete(self):
+        data = self._read_body()
+        pp = project_path(str(data.get("client", "")), str(data.get("name", "")))
+        if not pp:
+            return self._json(400, {"error": "proyecto no válido"})
+        try:
+            shutil.rmtree(pp)
+        except Exception as exc:
+            return self._json(500, {"error": f"no se pudo borrar: {exc}"})
+        self._json(200, {"ok": True})
+
+    # repos (dentro de cliente/proyecto)
+    def _repos_of(self, client, project):
+        pp = project_path(client, project)
+        if not pp:
+            return self._json(400, {"error": "ruta no válida"})
+        items = [self._repo_info(pp / r) for r in list_subdirs(pp)]
+        self._json(200, {"repos": items})
+
+    def _repo_branches(self, client, project, name):
+        rp = repo_path(client, project, name)
+        if not rp:
+            return self._json(400, {"error": "repo no válido"})
+        _, cur, _ = run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=rp, timeout=15)
+        _, out, _ = run_git(["branch", "-a", "--format=%(refname:short)"], cwd=rp, timeout=15)
+        branches = sorted({b.strip() for b in out.splitlines() if b.strip() and "HEAD" not in b})
+        self._json(200, {"current": cur.strip(), "branches": branches})
+
+    def _repo_clone(self):
+        data = self._read_body()
+        pp = project_path(str(data.get("client", "")), str(data.get("project", "")))
+        if not pp:
+            return self._json(400, {"error": "cliente/proyecto no válido"})
+        url = str(data.get("url", "")).strip()
+        if not url or not re.match(r"^(https://|git@|ssh://)", url):
+            return self._json(400, {"error": "URL git no válida (usa https:// o git@…)"})
+        name = str(data.get("name") or name_from_url(url))
+        target = repo_path(pp.parent.name, pp.name, name, must_exist=False)
+        if target is None:
+            return self._json(400, {"error": "nombre de repo no válido"})
+        if target.exists():
+            return self._json(409, {"error": f"ya existe un repo '{name}'"})
+        code, out, err = run_git(["clone", url, name], cwd=pp, timeout=600)
+        if code != 0:
+            return self._json(500, {"error": (err or out or "fallo al clonar").strip()[:800]})
+        self._json(200, {"ok": True, "name": name, "info": self._repo_info(target)})
+
+    def _repo_pull(self):
+        data = self._read_body()
+        rp = repo_path(str(data.get("client", "")), str(data.get("project", "")), str(data.get("name", "")))
+        if not rp:
+            return self._json(400, {"error": "repo no válido"})
+        code, out, err = run_git(["pull", "--ff-only"], cwd=rp, timeout=180)
+        msg = (out + err).strip()
+        if code != 0:
+            return self._json(500, {"error": msg[:800] or "fallo en git pull"})
+        self._json(200, {"ok": True, "output": msg[:800], "info": self._repo_info(rp)})
+
+    def _repo_checkout(self):
+        data = self._read_body()
+        rp = repo_path(str(data.get("client", "")), str(data.get("project", "")), str(data.get("name", "")))
+        branch = str(data.get("branch", "")).strip()
+        if not rp:
+            return self._json(400, {"error": "repo no válido"})
+        if not re.fullmatch(r"[A-Za-z0-9._/-]{1,120}", branch):
+            return self._json(400, {"error": "rama no válida"})
+        code, out, err = run_git(["checkout", branch], cwd=rp, timeout=60)
+        if code != 0:
+            return self._json(500, {"error": (err or out).strip()[:800]})
+        self._json(200, {"ok": True, "info": self._repo_info(rp)})
+
+    def _repo_delete(self):
+        data = self._read_body()
+        rp = repo_path(str(data.get("client", "")), str(data.get("project", "")), str(data.get("name", "")))
+        if not rp:
+            return self._json(400, {"error": "repo no válido"})
+        try:
+            shutil.rmtree(rp)
+        except Exception as exc:
+            return self._json(500, {"error": f"no se pudo borrar: {exc}"})
+        self._json(200, {"ok": True})
+
+    # -- el chat: streaming desde `claude -p` (cwd = repo) ----------------- #
     def _chat(self):
         data = self._read_body()
         message = str(data.get("message", "")).strip()
         session_id = data.get("session_id") or None
-        proj = project_path(str(data.get("project", "")))
+        proj = repo_path(str(data.get("client", "")), str(data.get("project", "")),
+                         str(data.get("repo", "")))
         if proj is None:
-            return self._json(400, {"error": "proyecto no válido o no seleccionado"})
+            return self._json(400, {"error": "repo no válido o no seleccionado"})
         if not message:
             return self._json(400, {"error": "mensaje vacío"})
 
-        lock = project_lock(proj.name)  # uno por proyecto -> varios en paralelo
+        key = str(proj.relative_to(PROJECTS))   # cliente/proyecto/repo
+        lock = project_lock(key)                # uno por repo -> varios en paralelo
         if not lock.acquire(blocking=False):
             return self._json(409, {"error": f"'{proj.name}' ya tiene una respuesta en curso"})
 
