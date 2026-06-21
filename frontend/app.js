@@ -152,6 +152,8 @@ $("#newBtn").onclick = () => {
 $("#profileBtn").onclick = () => {
   $("#profileMsg").textContent = ""; $("#profileMsg").style.color = "";
   $("#curPw").value = ""; $("#newPw").value = ""; $("#newPw2").value = "";
+  $("#totpMsg").textContent = ""; $("#totpMsg").style.color = "";
+  $("#totpPw").value = ""; $("#totpResult").classList.add("hidden"); $("#qrBox").innerHTML = "";
   $("#profile").classList.remove("hidden");
   $("#curPw").focus();
 };
@@ -180,6 +182,33 @@ async function savePassword() {
 }
 $("#savePwBtn").onclick = savePassword;
 $("#newPw2").addEventListener("keydown", e => { if (e.key === "Enter") savePassword(); });
+
+// ---- perfil: regenerar 2FA ----
+$("#resetTotpBtn").onclick = async () => {
+  const msg = $("#totpMsg"); msg.style.color = ""; msg.textContent = "";
+  const pw = $("#totpPw").value;
+  if (!pw) { msg.textContent = "Introduce tu contraseña actual"; return; }
+  if (!confirm("¿Regenerar el 2FA? El código actual dejará de funcionar; deberás escanear el QR nuevo.")) return;
+  let r;
+  try {
+    r = await fetch("/api/account/totp/reset", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({current_password: pw})
+    });
+  } catch (e) { msg.textContent = "Error de conexión"; return; }
+  if (!r.ok) {
+    let e = "No se pudo regenerar";
+    try { const j = await r.json(); if (j.error) e = j.error; } catch (_) {}
+    msg.textContent = e; return;
+  }
+  const j = await r.json();
+  $("#qrBox").innerHTML = j.svg || "";
+  $("#totpSecret").textContent = j.secret || "";
+  $("#totpResult").classList.remove("hidden");
+  $("#totpPw").value = "";
+  msg.style.color = "#3fb950";
+  msg.textContent = "✓ Nuevo 2FA generado. Escanéalo ahora.";
+};
 
 $("#logoutBtn").onclick = async () => {
   try { await fetch("/api/logout", {method: "POST"}); } catch (e) {}

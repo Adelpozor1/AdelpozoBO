@@ -383,6 +383,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._chat()
         if self.path == "/api/account/password":
             return self._change_password()
+        if self.path == "/api/account/totp/reset":
+            return self._reset_totp_web()
         self._json(404, {"error": "ruta desconocida"})
 
     def _read_body(self) -> dict:
@@ -439,6 +441,24 @@ class Handler(BaseHTTPRequestHandler):
         clear_sessions()                  # cierra el resto de dispositivos...
         cookie = make_cookie(create_session(), session_ttl())  # ...y renueva esta sesión
         self._json(200, {"ok": True}, extra_headers=[("Set-Cookie", cookie)])
+
+    def _reset_totp_web(self):
+        """Regenera el secreto 2FA desde el perfil y devuelve el nuevo QR (SVG)
+        para reinscribirlo. Pide la contraseña actual. Efecto inmediato."""
+        data = self._read_body()
+        if not verify_password(str(data.get("current_password", ""))):
+            time.sleep(1)
+            return self._json(403, {"error": "la contraseña actual no es correcta"})
+        CFG["totp_secret"] = generate_totp_secret()
+        CFG["totp_enabled"] = True
+        save_config(CFG)
+        uri = totp_uri(CFG)
+        try:
+            import qr
+            svg = qr.render_svg(uri)
+        except Exception:
+            svg = ""
+        self._json(200, {"ok": True, "secret": CFG["totp_secret"], "uri": uri, "svg": svg})
 
     # -- el chat: streaming desde `claude -p` ------------------------------ #
     def _chat(self):

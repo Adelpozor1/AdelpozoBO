@@ -354,6 +354,27 @@ def render(text: str, quiet: int = 4) -> str:
     return "\n".join(out)
 
 
+def render_svg(text: str, quiet: int = 4, scale: int = 6) -> str:
+    """QR como SVG (negro sobre blanco) para mostrarlo en el navegador."""
+    mod = _build(text.encode())
+    n = len(mod)
+    dim = (n + 2 * quiet) * scale
+    rects = []
+    for y in range(n):
+        for x in range(n):
+            if mod[y][x]:
+                rects.append(
+                    f'<rect x="{(x + quiet) * scale}" y="{(y + quiet) * scale}" '
+                    f'width="{scale}" height="{scale}"/>'
+                )
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{dim}" height="{dim}" '
+        f'viewBox="0 0 {dim} {dim}" shape-rendering="crispEdges">'
+        f'<rect width="{dim}" height="{dim}" fill="#fff"/>'
+        f'<g fill="#000">{"".join(rects)}</g></svg>'
+    )
+
+
 if __name__ == "__main__":
     import sys
     print(render(sys.argv[1] if len(sys.argv) > 1 else "https://anthropic.com"))

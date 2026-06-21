@@ -30,14 +30,27 @@
 
   <div id="profile" class="hidden">
     <div class="card">
-      <h1>Perfil · Cambiar contraseña</h1>
-      <p>Introduce la contraseña actual y la nueva.</p>
+      <h1>Perfil</h1>
+
+      <h2 class="section">Cambiar contraseña</h2>
       <input id="curPw" type="password" placeholder="Contraseña actual">
       <input id="newPw" type="password" placeholder="Nueva contraseña (mín. 8)">
       <input id="newPw2" type="password" placeholder="Repite la nueva">
-      <button id="savePwBtn">Guardar</button>
-      <button id="cancelPwBtn" class="secondary">Cancelar</button>
+      <button id="savePwBtn">Guardar contraseña</button>
       <div class="err" id="profileMsg"></div>
+
+      <h2 class="section">2FA (TOTP)</h2>
+      <p>Regenera el secreto y vuelve a escanear el QR en tu app.</p>
+      <input id="totpPw" type="password" placeholder="Contraseña actual">
+      <button id="resetTotpBtn">Regenerar 2FA</button>
+      <div id="totpResult" class="hidden">
+        <div id="qrBox"></div>
+        <p class="small">Secreto (entrada manual): <code id="totpSecret"></code></p>
+        <p class="small">⚠️ Escanéalo <b>antes</b> de cerrar sesión.</p>
+      </div>
+      <div class="err" id="totpMsg"></div>
+
+      <button id="cancelPwBtn" class="secondary">Cerrar</button>
     </div>
   </div>
 

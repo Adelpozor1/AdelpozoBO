@@ -74,5 +74,13 @@ textarea:focus { outline: none; border-color: var(--accent); }
                 font-weight: 600; cursor: pointer; }
 #profile button.secondary { background: transparent; border: 1px solid var(--border);
                 color: var(--muted); font-weight: 500; }
+#profile .card { max-height: 90vh; overflow-y: auto; }
+#profile h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
+                color: var(--muted); text-align: left; margin: 22px 0 8px;
+                border-top: 1px solid var(--border); padding-top: 16px; }
+#profile .small { font-size: 12px; color: var(--muted); margin: 8px 0 0; word-break: break-all; }
+#profile #totpPw { margin-top: 0; }
+#profile #qrBox svg { width: 200px; height: 200px; display: block;
+                margin: 10px auto 0; background: #fff; border-radius: 8px; }
 #login .err, #profile .err { margin-top: 10px; min-height: 18px; }
 .hidden { display: none !important; }
