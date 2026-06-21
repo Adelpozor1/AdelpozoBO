@@ -395,7 +395,6 @@ function handleEvent(name, convo, ev) {
       pushTo(name, convo, {t: "meta", text: "⚠️ " + ev.text, cls: "err"}); break;
     case "done":
       if (ev.session_id) { convo.sessionId = ev.session_id; saveConvos(name); }
-      if (ev.cost_usd != null) pushTo(name, convo, {t: "meta", text: "✓ turno completado · ~$" + ev.cost_usd.toFixed(4)});
       break;
   }
 }
