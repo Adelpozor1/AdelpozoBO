@@ -498,12 +498,15 @@ class Handler(BaseHTTPRequestHandler):
         routes = {
             "/api/clients/create": self._client_create,
             "/api/clients/delete": self._client_delete,
+            "/api/clients/rename": self._client_rename,
             "/api/projects/create": self._project_create,
             "/api/projects/delete": self._project_delete,
+            "/api/projects/rename": self._project_rename,
             "/api/repos/clone": self._repo_clone,
             "/api/repos/pull": self._repo_pull,
             "/api/repos/checkout": self._repo_checkout,
             "/api/repos/delete": self._repo_delete,
+            "/api/repos/rename": self._repo_rename,
         }
         if self.path in routes:
             return routes[self.path]()
@@ -629,6 +632,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(500, {"error": f"no se pudo borrar: {exc}"})
         self._json(200, {"ok": True})
 
+    def _rename_dir(self, old, new):
+        if not old:
+            return self._json(400, {"error": "origen no válido"})
+        if new is None:
+            return self._json(400, {"error": "nombre nuevo no válido"})
+        if new.exists():
+            return self._json(409, {"error": "ya existe algo con ese nombre"})
+        try:
+            old.rename(new)
+        except Exception as exc:
+            return self._json(500, {"error": f"no se pudo renombrar: {exc}"})
+        self._json(200, {"ok": True, "name": new.name})
+
+    def _client_rename(self):
+        data = self._read_body()
+        self._rename_dir(client_path(str(data.get("name", ""))),
+                         client_path(str(data.get("new_name", "")), must_exist=False))
+
     # proyectos (dentro de un cliente)
     def _projects_of(self, client):
         cp = client_path(client)
@@ -661,6 +682,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             return self._json(500, {"error": f"no se pudo borrar: {exc}"})
         self._json(200, {"ok": True})
+
+    def _project_rename(self):
+        data = self._read_body()
+        c = str(data.get("client", ""))
+        self._rename_dir(project_path(c, str(data.get("name", ""))),
+                         project_path(c, str(data.get("new_name", "")), must_exist=False))
 
     # repos (dentro de cliente/proyecto)
     def _repos_of(self, client, project):
@@ -732,6 +759,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             return self._json(500, {"error": f"no se pudo borrar: {exc}"})
         self._json(200, {"ok": True})
+
+    def _repo_rename(self):
+        data = self._read_body()
+        c, p = str(data.get("client", "")), str(data.get("project", ""))
+        self._rename_dir(repo_path(c, p, str(data.get("name", ""))),
+                         repo_path(c, p, str(data.get("new_name", "")), must_exist=False))
 
     # -- el chat: streaming desde `claude -p` (cwd = repo) ----------------- #
     def _chat(self):

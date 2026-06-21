@@ -112,9 +112,11 @@ function renderClientGrid() {
   for (const c of clients) {
     const d = document.createElement("div"); d.className = "card-item";
     d.innerHTML = `<h3>${esc(c.name)}</h3><div class="ci-meta">${c.projects} proyecto(s)</div>`;
+    const ed = document.createElement("button"); ed.className = "ci-edit"; ed.textContent = "✎"; ed.title = "Renombrar";
+    ed.onclick = ev => { ev.stopPropagation(); renameClient(c.name); };
     const del = document.createElement("button"); del.className = "ci-del"; del.textContent = "×";
     del.onclick = ev => { ev.stopPropagation(); delClient(c.name); };
-    d.appendChild(del);
+    d.appendChild(ed); d.appendChild(del);
     d.onclick = () => openClient(c.name);
     g.appendChild(d);
   }
@@ -130,6 +132,13 @@ async function delClient(name) {
   if (!confirm(`¿Borrar el cliente "${name}" y TODOS sus proyectos y repos?`)) return;
   const r = await fetch("/api/clients/delete", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name}) });
   if (r.ok) loadClients(); else alert("No se pudo borrar");
+}
+async function renameClient(name) {
+  const nn = (prompt("Nuevo nombre del cliente:", name) || "").trim();
+  if (!nn || nn === name) return;
+  const r = await fetch("/api/clients/rename", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name, new_name: nn}) });
+  if (r.ok) { if (selClient === name) { selClient = nn; localStorage.setItem("lastClient", nn); } loadClients(); }
+  else { const j = await r.json().catch(() => ({})); alert(j.error || "No se pudo renombrar"); }
 }
 async function openClient(name) {
   selClient = name; localStorage.setItem("lastClient", name);
@@ -151,9 +160,11 @@ function renderProjectGrid() {
   for (const p of projectsList) {
     const d = document.createElement("div"); d.className = "card-item";
     d.innerHTML = `<h3>${esc(p.name)}</h3><div class="ci-meta">${p.repos} repo(s)</div>`;
+    const ed = document.createElement("button"); ed.className = "ci-edit"; ed.textContent = "✎"; ed.title = "Renombrar";
+    ed.onclick = ev => { ev.stopPropagation(); renameProject(p.name); };
     const del = document.createElement("button"); del.className = "ci-del"; del.textContent = "×";
     del.onclick = ev => { ev.stopPropagation(); delProject(p.name); };
-    d.appendChild(del);
+    d.appendChild(ed); d.appendChild(del);
     d.onclick = () => openProject(p.name);
     g.appendChild(d);
   }
@@ -170,6 +181,13 @@ async function delProject(name) {
   const r = await fetch("/api/projects/delete", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({client: selClient, name}) });
   if (r.ok) loadProjects(); else alert("No se pudo borrar");
 }
+async function renameProject(name) {
+  const nn = (prompt("Nuevo nombre del proyecto:", name) || "").trim();
+  if (!nn || nn === name) return;
+  const r = await fetch("/api/projects/rename", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({client: selClient, name, new_name: nn}) });
+  if (r.ok) { if (selProject === name) { selProject = nn; localStorage.setItem("lastProject", nn); } loadProjects(); }
+  else { const j = await r.json().catch(() => ({})); alert(j.error || "No se pudo renombrar"); }
+}
 async function openProject(name) {
   selProject = name; localStorage.setItem("lastProject", name);
   current = null;
@@ -185,7 +203,7 @@ function enterReposView() {
   $("#crumb").textContent = `${selClient} / ${selProject}`;
   if (!current) {
     $("#projName").textContent = "—";
-    ["#projBranch", "#branchSel", "#pullBtn", "#delBtn", "#convoToggle"].forEach(id => $(id).classList.add("hidden"));
+    ["#projBranch", "#branchSel", "#pullBtn", "#renameBtn", "#delBtn", "#convoToggle"].forEach(id => $(id).classList.add("hidden"));
     log.innerHTML = '<div class="meta">Clona o elige un repositorio de la izquierda.</div>';
   }
   renderConvoList();
@@ -217,7 +235,7 @@ function renderRepoList() {
 }
 function selectRepo(name) {
   current = name; localStorage.setItem("lastRepo", name);
-  ["#projBranch", "#branchSel", "#pullBtn", "#delBtn", "#convoToggle"].forEach(id => $(id).classList.remove("hidden"));
+  ["#projBranch", "#branchSel", "#pullBtn", "#renameBtn", "#delBtn", "#convoToggle"].forEach(id => $(id).classList.remove("hidden"));
   $("#projName").textContent = name;
   const p = repos.find(x => x.name === name);
   $("#projBranch").textContent = p && p.branch ? p.branch : "";
@@ -312,6 +330,20 @@ $("#delBtn").onclick = async () => {
   const r = await fetch("/api/repos/delete", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({client: selClient, project: selProject, name}) });
   if (r.ok) { delete pstate[repoKey(name)]; localStorage.removeItem("convos:" + repoKey(name)); localStorage.removeItem("active:" + repoKey(name)); current = null; await loadRepos(); enterReposView(); }
   else { const j = await r.json().catch(() => ({})); alert(j.error || "No se pudo borrar"); }
+};
+$("#renameBtn").onclick = async () => {
+  if (!current) return;
+  const name = current;
+  const nn = (prompt("Nuevo nombre del repo:", name) || "").trim();
+  if (!nn || nn === name) return;
+  const r = await fetch("/api/repos/rename", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({client: selClient, project: selProject, name, new_name: nn}) });
+  if (r.ok) {
+    const oldK = repoKey(name), newK = `${selClient}/${selProject}/${nn}`;
+    if (pstate[oldK]) { pstate[newK] = pstate[oldK]; delete pstate[oldK]; }   // conserva conversaciones
+    for (const k of ["convos:", "active:"]) { const v = localStorage.getItem(k + oldK); if (v) { localStorage.setItem(k + newK, v); localStorage.removeItem(k + oldK); } }
+    current = nn; localStorage.setItem("lastRepo", nn);
+    await loadRepos(); selectRepo(nn);
+  } else { const j = await r.json().catch(() => ({})); alert(j.error || "No se pudo renombrar"); }
 };
 
 // ---- clonar repo ----

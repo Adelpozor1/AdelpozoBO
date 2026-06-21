@@ -104,6 +104,10 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
 .card-item .ci-del { position: absolute; top: 6px; right: 8px; background: transparent;
              border: none; color: var(--muted); cursor: pointer; font-size: 16px; opacity: .55; }
 .card-item .ci-del:hover { color: #f85149; opacity: 1; }
+.card-item .ci-edit { position: absolute; top: 6px; right: 32px; background: transparent;
+             border: none; color: var(--muted); cursor: pointer; font-size: 13px; opacity: .55; }
+.card-item .ci-edit:hover { color: var(--text); opacity: 1; }
+.card-item h3 { padding-right: 44px; }
 .grid-empty { color: var(--muted); grid-column: 1/-1; padding: 8px; }
 
 /* pestañas de sección (Desarrollo / Monitorización) */
