@@ -381,6 +381,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(401, {"error": "no autorizado"})
         if self.path == "/api/chat":
             return self._chat()
+        if self.path == "/api/account/password":
+            return self._change_password()
         self._json(404, {"error": "ruta desconocida"})
 
     def _read_body(self) -> dict:
@@ -419,6 +421,24 @@ class Handler(BaseHTTPRequestHandler):
         destroy_session(self._cookie_token())  # revoca en servidor
         expired = make_cookie("", 0)            # borra la cookie en el navegador
         self._json(200, {"ok": True}, extra_headers=[("Set-Cookie", expired)])
+
+    def _change_password(self):
+        """Cambia la contraseña desde el perfil web. Pide la actual. Surte
+        efecto al instante (sin reinicio): actualiza CFG en memoria y disco."""
+        data = self._read_body()
+        cur = str(data.get("current_password", ""))
+        new = str(data.get("new_password", ""))
+        if not verify_password(cur):
+            time.sleep(1)
+            return self._json(403, {"error": "la contraseña actual no es correcta"})
+        if len(new) < 8:
+            return self._json(400, {"error": "la nueva contraseña debe tener al menos 8 caracteres"})
+        CFG["password_hash"] = hash_password(new)
+        CFG["password"] = ""              # elimina cualquier texto plano heredado
+        save_config(CFG)
+        clear_sessions()                  # cierra el resto de dispositivos...
+        cookie = make_cookie(create_session(), session_ttl())  # ...y renueva esta sesión
+        self._json(200, {"ok": True}, extra_headers=[("Set-Cookie", cookie)])
 
     # -- el chat: streaming desde `claude -p` ------------------------------ #
     def _chat(self):

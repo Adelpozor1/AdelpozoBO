@@ -148,6 +148,39 @@ $("#newBtn").onclick = () => {
   $("#input").focus();
 };
 
+// ---- perfil: cambiar contraseña ----
+$("#profileBtn").onclick = () => {
+  $("#profileMsg").textContent = ""; $("#profileMsg").style.color = "";
+  $("#curPw").value = ""; $("#newPw").value = ""; $("#newPw2").value = "";
+  $("#profile").classList.remove("hidden");
+  $("#curPw").focus();
+};
+$("#cancelPwBtn").onclick = () => $("#profile").classList.add("hidden");
+async function savePassword() {
+  const cur = $("#curPw").value, n1 = $("#newPw").value, n2 = $("#newPw2").value;
+  const msg = $("#profileMsg"); msg.style.color = "";
+  if (n1 !== n2) { msg.textContent = "Las contraseñas nuevas no coinciden"; return; }
+  if (n1.length < 8) { msg.textContent = "Mínimo 8 caracteres"; return; }
+  let r;
+  try {
+    r = await fetch("/api/account/password", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({current_password: cur, new_password: n1})
+    });
+  } catch (e) { msg.textContent = "Error de conexión"; return; }
+  if (r.ok) {
+    msg.style.color = "#3fb950";
+    msg.textContent = "✓ Contraseña actualizada";
+    setTimeout(() => $("#profile").classList.add("hidden"), 1200);
+  } else {
+    let e = "No se pudo cambiar";
+    try { const j = await r.json(); if (j.error) e = j.error; } catch (_) {}
+    msg.textContent = e;
+  }
+}
+$("#savePwBtn").onclick = savePassword;
+$("#newPw2").addEventListener("keydown", e => { if (e.key === "Enter") savePassword(); });
+
 $("#logoutBtn").onclick = async () => {
   try { await fetch("/api/logout", {method: "POST"}); } catch (e) {}
   // limpia estado local y vuelve a la pantalla de login

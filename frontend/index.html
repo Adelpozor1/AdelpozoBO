@@ -24,8 +24,22 @@
     <span class="meta" id="status">listo</span>
     <span class="spacer"></span>
     <button id="newBtn">Nueva conversación</button>
+    <button id="profileBtn">Perfil</button>
     <button id="logoutBtn">Salir</button>
   </header>
+
+  <div id="profile" class="hidden">
+    <div class="card">
+      <h1>Perfil · Cambiar contraseña</h1>
+      <p>Introduce la contraseña actual y la nueva.</p>
+      <input id="curPw" type="password" placeholder="Contraseña actual">
+      <input id="newPw" type="password" placeholder="Nueva contraseña (mín. 8)">
+      <input id="newPw2" type="password" placeholder="Repite la nueva">
+      <button id="savePwBtn">Guardar</button>
+      <button id="cancelPwBtn" class="secondary">Cancelar</button>
+      <div class="err" id="profileMsg"></div>
+    </div>
+  </div>
 
   <div id="log" class="hidden"></div>
 

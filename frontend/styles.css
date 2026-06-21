@@ -57,19 +57,22 @@ textarea:focus { outline: none; border-color: var(--accent); }
 }
 .send:disabled { opacity: .5; cursor: default; }
 
-/* login */
-#login { position: fixed; inset: 0; background: var(--bg); display: flex;
-         align-items: center; justify-content: center; }
-#login .card { background: var(--panel); border: 1px solid var(--border);
+/* login + perfil (misma tarjeta modal) */
+#login, #profile { position: fixed; inset: 0; background: rgba(0,0,0,.55);
+         display: flex; align-items: center; justify-content: center; z-index: 20; }
+#login { background: var(--bg); }
+#login .card, #profile .card { background: var(--panel); border: 1px solid var(--border);
                border-radius: 14px; padding: 28px; width: 320px; text-align: center; }
-#login h1 { font-size: 18px; margin: 0 0 4px; }
-#login p { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
-#login input { width: 100%; padding: 10px 12px; border-radius: 8px;
+#login h1, #profile h1 { font-size: 18px; margin: 0 0 4px; }
+#login p, #profile p { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
+#login input, #profile input { width: 100%; padding: 10px 12px; border-radius: 8px;
                border: 1px solid var(--border); background: var(--bg);
                color: var(--text); font: inherit; }
-#login #code { margin-top: 10px; }
-#login button { width: 100%; margin-top: 12px; padding: 10px; border: none;
+#login #code, #profile #newPw, #profile #newPw2 { margin-top: 10px; }
+#login button, #profile button { width: 100%; margin-top: 12px; padding: 10px; border: none;
                 border-radius: 8px; background: var(--accent); color: #1a1109;
                 font-weight: 600; cursor: pointer; }
-#login .err { margin-top: 10px; min-height: 18px; }
+#profile button.secondary { background: transparent; border: 1px solid var(--border);
+                color: var(--muted); font-weight: 500; }
+#login .err, #profile .err { margin-top: 10px; min-height: 18px; }
 .hidden { display: none !important; }
