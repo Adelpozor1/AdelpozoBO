@@ -149,6 +149,7 @@ def load_config() -> dict:
     cfg.setdefault("cookie_secure", True)  # cookie solo por HTTPS (Tailscale serve)
     cfg.setdefault("session_days", 30)     # caducidad de la sesión
     cfg.setdefault("projects_dir", str(Path.home() / "projects"))  # zona de desarrollo
+    cfg.setdefault("github_token", "")     # para clonar privados por HTTPS (sin SSH)
     if changed or not CONF_PATH.exists():
         CONF_PATH.write_text(json.dumps(cfg, indent=2))
         os.chmod(CONF_PATH, 0o600)
@@ -197,9 +198,19 @@ GIT_ENV = {
 }
 
 
+def git_auth_args() -> list[str]:
+    """Si hay token de GitHub, manda Authorization solo a github.com (HTTPS).
+    Vía -c (no se persiste en .git/config, no queda el token en el repo)."""
+    tok = CFG.get("github_token")
+    if not tok:
+        return []
+    b64 = base64.b64encode(("x-access-token:" + tok).encode()).decode()
+    return ["-c", f"http.https://github.com/.extraHeader=Authorization: Basic {b64}"]
+
+
 def run_git(args: list[str], cwd=None, timeout: int = 300):
     try:
-        p = subprocess.run(["git", *args], cwd=cwd, env=GIT_ENV,
+        p = subprocess.run(["git", *git_auth_args(), *args], cwd=cwd, env=GIT_ENV,
                            capture_output=True, text=True, timeout=timeout)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
@@ -426,8 +437,11 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/static/"):
             self._serve_static(path[len("/static/") :])
         elif path == "/api/whoami":
-            self._json(200, {"authed": self._is_authed(),
-                             "totp": bool(CFG.get("totp_enabled"))})
+            authed = self._is_authed()
+            resp = {"authed": authed, "totp": bool(CFG.get("totp_enabled"))}
+            if authed:
+                resp["github_token_set"] = bool(CFG.get("github_token"))
+            self._json(200, resp)
         elif path == "/api/projects":
             if not self._is_authed():
                 return self._json(401, {"error": "no autorizado"})
@@ -453,6 +467,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._change_password()
         if self.path == "/api/account/totp/reset":
             return self._reset_totp_web()
+        if self.path == "/api/account/github-token":
+            return self._set_github_token()
         if self.path == "/api/projects/clone":
             return self._project_clone()
         if self.path == "/api/projects/pull":
@@ -535,6 +551,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             svg = ""
         self._json(200, {"ok": True, "secret": CFG["totp_secret"], "uri": uri, "svg": svg})
+
+    def _set_github_token(self):
+        """Guarda (o borra) el token de GitHub para clonar privados por HTTPS.
+        Efecto inmediato. No requiere reinicio."""
+        tok = str(self._read_body().get("token", "")).strip()
+        CFG["github_token"] = tok
+        save_config(CFG)
+        self._json(200, {"ok": True, "set": bool(tok)})
 
     # -- proyectos (zona de desarrollo) ------------------------------------ #
     def _project_info(self, d: Path) -> dict:

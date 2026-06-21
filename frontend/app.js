@@ -406,14 +406,42 @@ $("#input").addEventListener("keydown", e => {
 // --------------------------------------------------------------------------- //
 // Perfil: contraseña + 2FA
 // --------------------------------------------------------------------------- //
-$("#profileBtn").onclick = () => {
+$("#profileBtn").onclick = async () => {
   $("#profileMsg").textContent = ""; $("#profileMsg").style.color = "";
   $("#curPw").value = ""; $("#newPw").value = ""; $("#newPw2").value = "";
   $("#totpMsg").textContent = ""; $("#totpMsg").style.color = "";
   $("#totpPw").value = ""; $("#totpResult").classList.add("hidden"); $("#qrBox").innerHTML = "";
+  $("#ghToken").value = ""; $("#ghMsg").textContent = ""; $("#ghMsg").style.color = "";
+  $("#ghStatus").textContent = "…";
   $("#profile").classList.remove("hidden");
   $("#curPw").focus();
+  try {
+    const j = await (await fetch("/api/whoami")).json();
+    $("#ghStatus").textContent = j.github_token_set ? "✓ token configurado" : "sin token configurado";
+  } catch (_) { $("#ghStatus").textContent = ""; }
 };
+async function saveGithubToken() {
+  const msg = $("#ghMsg"); msg.style.color = "";
+  const token = $("#ghToken").value.trim();
+  let r;
+  try {
+    r = await fetch("/api/account/github-token", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({token})
+    });
+  } catch (e) { msg.textContent = "Error de conexión"; return; }
+  if (r.ok) {
+    const j = await r.json();
+    msg.style.color = "#3fb950"; msg.textContent = token ? "✓ Token guardado" : "✓ Token eliminado";
+    $("#ghToken").value = "";
+    $("#ghStatus").textContent = j.set ? "✓ token configurado" : "sin token configurado";
+  } else {
+    let e = "No se pudo guardar";
+    try { const j = await r.json(); if (j.error) e = j.error; } catch (_) {}
+    msg.textContent = e;
+  }
+}
+$("#saveGhBtn").onclick = saveGithubToken;
 $("#cancelPwBtn").onclick = () => $("#profile").classList.add("hidden");
 async function savePassword() {
   const cur = $("#curPw").value, n1 = $("#newPw").value, n2 = $("#newPw2").value;
