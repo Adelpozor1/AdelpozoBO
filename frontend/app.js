@@ -4,20 +4,40 @@ function esc(s) { return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt
 function scroll() { log.scrollTop = log.scrollHeight; }
 
 // --------------------------------------------------------------------------- //
-// Estado por proyecto (permite varios proyectos en paralelo)
+// Estado por proyecto: varias conversaciones, cada una con su sesión de Claude.
+//   pstate[name] = { convos:[{id,title,sessionId,entries}], activeId, busy }
+// (busy es por proyecto: el backend solo deja un turno a la vez por proyecto)
 // --------------------------------------------------------------------------- //
 let projects = [];     // [{name, branch, dirty, remote, last, git}]
 let current = null;    // proyecto activo (visible)
-const pstate = {};     // name -> {sessionId, entries:[], busy}
+const pstate = {};
 
+function newConvoObj() {
+  return { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+           title: "Conversación", sessionId: null, entries: [] };
+}
 function st(name) {
   if (!pstate[name]) {
-    pstate[name] = {
-      sessionId: localStorage.getItem("sess:" + name) || null,
-      entries: [], busy: false,
-    };
+    let saved = [];
+    try { saved = JSON.parse(localStorage.getItem("convos:" + name) || "[]"); } catch (_) {}
+    let convos = saved.map(c => ({ id: c.id, title: c.title || "Conversación",
+                                   sessionId: c.sessionId || null, entries: [] }));
+    if (!convos.length) convos = [newConvoObj()];
+    let activeId = localStorage.getItem("active:" + name);
+    if (!convos.find(c => c.id === activeId)) activeId = convos[0].id;
+    pstate[name] = { convos, activeId, busy: false };
   }
   return pstate[name];
+}
+function activeConvo(name) {
+  const s = st(name);
+  return s.convos.find(c => c.id === s.activeId) || s.convos[0];
+}
+function saveConvos(name) {
+  const s = st(name);
+  localStorage.setItem("convos:" + name,
+    JSON.stringify(s.convos.map(c => ({ id: c.id, title: c.title, sessionId: c.sessionId }))));
+  localStorage.setItem("active:" + name, s.activeId);
 }
 
 // --------------------------------------------------------------------------- //
@@ -44,7 +64,7 @@ async function doLogin() {
 function showApp() {
   $("#login").classList.add("hidden");
   $("#app-header").classList.remove("hidden");
-  $("#main-row").classList.remove("hidden");
+  setSection("dev");
   loadProjects().then(() => {
     const saved = localStorage.getItem("current");
     if (saved && projects.find(p => p.name === saved)) selectProject(saved);
@@ -57,7 +77,19 @@ $("#pw").addEventListener("keydown", e => {
 $("#code").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
 
 // --------------------------------------------------------------------------- //
-// Render del log (desde el estado del proyecto activo)
+// Secciones (Desarrollo / Monitorización)
+// --------------------------------------------------------------------------- //
+function setSection(s) {
+  const dev = s === "dev";
+  $("#tabDev").classList.toggle("active", dev);
+  $("#main-row").classList.toggle("hidden", !dev);
+  $("#mon-view").classList.toggle("hidden", dev);
+}
+$("#tabDev").onclick = () => setSection("dev");
+// #tabMon está deshabilitado (sección de monitorización aún no activa)
+
+// --------------------------------------------------------------------------- //
+// Render del log (desde la conversación activa del proyecto visible)
 // --------------------------------------------------------------------------- //
 function appendEntry(e) {
   if (e.t === "user" || e.t === "claude") {
@@ -80,11 +112,11 @@ function appendEntry(e) {
 }
 function renderLog() {
   log.innerHTML = "";
-  if (current) st(current).entries.forEach(appendEntry);
+  if (current) activeConvo(current).entries.forEach(appendEntry);
 }
-function addEntry(name, e) {            // añade al estado y pinta si es el visible
-  st(name).entries.push(e);
-  if (name === current) appendEntry(e);
+function pushTo(name, convo, e) {     // añade a una conversación y pinta si está visible
+  convo.entries.push(e);
+  if (name === current && convo.id === st(name).activeId) appendEntry(e);
 }
 
 // --------------------------------------------------------------------------- //
@@ -131,6 +163,7 @@ function selectProject(name) {
   $("#projName").textContent = name;
   refreshProjbar();
   renderProjectList();
+  renderConvoSel();
   renderLog();
   loadBranches(name);
   updateInputState();
@@ -141,6 +174,38 @@ function refreshProjbar() {
   const p = projects.find(x => x.name === current);
   $("#projBranch").textContent = p && p.branch ? p.branch : "";
 }
+
+// ---- conversaciones ----
+function renderConvoSel() {
+  const sel = $("#convoSel"); sel.innerHTML = "";
+  if (!current) return;
+  const s = st(current);
+  s.convos.forEach((c, i) => {
+    const o = document.createElement("option");
+    o.value = c.id; o.textContent = c.title || ("Conversación " + (i + 1));
+    if (c.id === s.activeId) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+$("#convoSel").onchange = e => {
+  if (!current) return;
+  st(current).activeId = e.target.value;
+  saveConvos(current);
+  renderLog();
+  updateInputState();
+  $("#input").focus();
+};
+$("#newBtn").onclick = () => {
+  if (!current) return;
+  const s = st(current);
+  const c = newConvoObj();
+  s.convos.push(c); s.activeId = c.id;
+  saveConvos(current);
+  renderConvoSel(); renderLog(); updateInputState();
+  $("#input").focus();
+};
+
+// ---- git ----
 async function loadBranches(name) {
   const sel = $("#branchSel"); sel.innerHTML = "";
   try {
@@ -164,19 +229,21 @@ $("#branchSel").onchange = async e => {
     body: JSON.stringify({name: current, branch})
   });
   const j = await r.json().catch(() => ({}));
-  if (r.ok) { addEntry(current, {t: "meta", text: "✓ rama: " + branch}); await loadProjects(); refreshProjbar(); }
-  else { addEntry(current, {t: "meta", text: "⚠️ " + (j.error || "no se pudo cambiar de rama"), cls: "err"}); loadBranches(current); }
+  const c = activeConvo(current);
+  if (r.ok) { pushTo(current, c, {t: "meta", text: "✓ rama: " + branch}); await loadProjects(); refreshProjbar(); }
+  else { pushTo(current, c, {t: "meta", text: "⚠️ " + (j.error || "no se pudo cambiar de rama"), cls: "err"}); loadBranches(current); }
 };
 $("#pullBtn").onclick = async () => {
   if (!current) return;
-  addEntry(current, {t: "meta", text: "git pull…"});
+  const c = activeConvo(current);
+  pushTo(current, c, {t: "meta", text: "git pull…"});
   const r = await fetch("/api/projects/pull", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({name: current})
   });
   const j = await r.json().catch(() => ({}));
-  if (r.ok) { addEntry(current, {t: "meta", text: "✓ " + (j.output || "actualizado")}); await loadProjects(); refreshProjbar(); }
-  else addEntry(current, {t: "meta", text: "⚠️ " + (j.error || "fallo en pull"), cls: "err"});
+  if (r.ok) { pushTo(current, c, {t: "meta", text: "✓ " + (j.output || "actualizado")}); await loadProjects(); refreshProjbar(); }
+  else pushTo(current, c, {t: "meta", text: "⚠️ " + (j.error || "fallo en pull"), cls: "err"});
 };
 $("#delBtn").onclick = async () => {
   if (!current) return;
@@ -187,17 +254,11 @@ $("#delBtn").onclick = async () => {
     body: JSON.stringify({name})
   });
   if (r.ok) {
-    delete pstate[name]; localStorage.removeItem("sess:" + name);
+    delete pstate[name];
+    localStorage.removeItem("convos:" + name); localStorage.removeItem("active:" + name);
     current = null; $("#projbar").classList.add("hidden"); log.innerHTML = "";
     await loadProjects();
   } else { const j = await r.json().catch(() => ({})); alert(j.error || "No se pudo borrar"); }
-};
-$("#newBtn").onclick = () => {
-  if (!current) return;
-  const s = st(current); s.sessionId = null; localStorage.removeItem("sess:" + current);
-  s.entries = []; renderLog();
-  addEntry(current, {t: "meta", text: "Nueva conversación en " + current + "."});
-  $("#input").focus();
 };
 $("#menuBtn").onclick = () => $("#main-row").classList.toggle("side-open");
 
@@ -233,7 +294,7 @@ async function doClone() {
 $("#doCloneBtn").onclick = doClone;
 
 // --------------------------------------------------------------------------- //
-// Chat (scoped al proyecto; varios pueden correr a la vez)
+// Chat (scoped a proyecto + conversación)
 // --------------------------------------------------------------------------- //
 function updateInputState() {
   const busy = current && st(current).busy;
@@ -253,18 +314,22 @@ async function send() {
   const input = $("#input"), text = input.value.trim();
   if (!text) return;
   input.value = "";
-  addEntry(name, {t: "user", text});
+  const convo = activeConvo(name);
+  if (convo.title === "Conversación" && !convo.entries.length) {
+    convo.title = text.slice(0, 32); saveConvos(name); renderConvoSel();
+  }
+  pushTo(name, convo, {t: "user", text});
   setBusy(name, true);
   try {
     const r = await fetch("/api/chat", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({message: text, session_id: s.sessionId, project: name})
+      body: JSON.stringify({message: text, session_id: convo.sessionId, project: name})
     });
-    if (r.status === 409) { addEntry(name, {t: "meta", text: "Ocupado: ya hay una respuesta en curso.", cls: "err"}); setBusy(name, false); return; }
+    if (r.status === 409) { pushTo(name, convo, {t: "meta", text: "Ocupado: este proyecto ya tiene una respuesta en curso.", cls: "err"}); setBusy(name, false); return; }
     if (!r.ok) {
       let e = "Error " + r.status;
       try { const j = await r.json(); if (j.error) e = j.error; } catch (_) {}
-      addEntry(name, {t: "meta", text: e, cls: "err"}); setBusy(name, false); return;
+      pushTo(name, convo, {t: "meta", text: e, cls: "err"}); setBusy(name, false); return;
     }
     const reader = r.body.getReader(), dec = new TextDecoder();
     let buf = "";
@@ -275,36 +340,36 @@ async function send() {
       let nl;
       while ((nl = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-        if (line.trim()) handleEvent(name, JSON.parse(line));
+        if (line.trim()) handleEvent(name, convo, JSON.parse(line));
       }
     }
   } catch (e) {
-    addEntry(name, {t: "meta", text: "Conexión interrumpida: " + e.message, cls: "err"});
+    pushTo(name, convo, {t: "meta", text: "Conexión interrumpida: " + e.message, cls: "err"});
   } finally {
     setBusy(name, false);
   }
 }
-function handleEvent(name, ev) {
+function handleEvent(name, convo, ev) {
   switch (ev.type) {
     case "text":
-      addEntry(name, {t: "claude", text: ev.text}); break;
+      pushTo(name, convo, {t: "claude", text: ev.text}); break;
     case "tool": {
       let arg = "";
       if (ev.input && ev.input.command) arg = ev.input.command;
       else if (ev.input && ev.input.file_path) arg = ev.input.file_path;
       else if (ev.input && ev.input.pattern) arg = ev.input.pattern;
-      addEntry(name, {t: "chip", html: `🔧 <code>${esc(ev.name)}</code> ${esc(String(arg).slice(0,120))}`});
+      pushTo(name, convo, {t: "chip", html: `🔧 <code>${esc(ev.name)}</code> ${esc(String(arg).slice(0,120))}`});
       break;
     }
     case "tool_result": break;
     case "ratelimit":
-      addEntry(name, {t: "meta", text: "⏳ Límite de uso: " + (ev.info.rateLimitType || "") + " (" + (ev.info.status || "") + ")", cls: "err"});
+      pushTo(name, convo, {t: "meta", text: "⏳ Límite de uso: " + (ev.info.rateLimitType || "") + " (" + (ev.info.status || "") + ")", cls: "err"});
       break;
     case "error":
-      addEntry(name, {t: "meta", text: "⚠️ " + ev.text, cls: "err"}); break;
+      pushTo(name, convo, {t: "meta", text: "⚠️ " + ev.text, cls: "err"}); break;
     case "done":
-      if (ev.session_id) { st(name).sessionId = ev.session_id; localStorage.setItem("sess:" + name, ev.session_id); }
-      if (ev.cost_usd != null) addEntry(name, {t: "meta", text: "✓ turno completado · ~$" + ev.cost_usd.toFixed(4)});
+      if (ev.session_id) { convo.sessionId = ev.session_id; saveConvos(name); }
+      if (ev.cost_usd != null) pushTo(name, convo, {t: "meta", text: "✓ turno completado · ~$" + ev.cost_usd.toFixed(4)});
       break;
   }
 }
@@ -382,6 +447,7 @@ $("#logoutBtn").onclick = async () => {
   current = null;
   $("#app-header").classList.add("hidden");
   $("#main-row").classList.add("hidden");
+  $("#mon-view").classList.add("hidden");
   $("#login").classList.remove("hidden");
   $("#pw").value = ""; $("#code").value = ""; $("#loginErr").textContent = "";
   $("#pw").focus();
