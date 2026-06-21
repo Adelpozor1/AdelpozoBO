@@ -1,0 +1,14 @@
+# Secretos y runtime — ¡NUNCA subir!
+backend/panel.conf
+backend/panel.log
+
+# Caches de Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor / SO
+.DS_Store
+.idea/
+.vscode/
+*.swp

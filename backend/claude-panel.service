@@ -1,0 +1,19 @@
+# systemd unit -> /etc/systemd/system/claude-panel.service
+#   sudo cp backend/claude-panel.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now claude-panel
+#   journalctl -u claude-panel -f      # contraseña + inscripción 2FA al arrancar
+[Unit]
+Description=Panel web Claude (agente sobre esta VPS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=adelpozor
+WorkingDirectory=/home/adelpozor/claude-panel/backend
+ExecStart=/usr/bin/python3 /home/adelpozor/claude-panel/backend/server.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

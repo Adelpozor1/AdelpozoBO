@@ -1,0 +1,14 @@
+{
+  "_comment": "Copia este fichero a panel.conf. Deja password/secret/totp_secret vacíos: se autogeneran de forma segura en el primer arranque y se reescriben con permisos 600. NO subas panel.conf a git.",
+  "password": "",
+  "secret": "",
+  "totp_secret": "",
+  "totp_enabled": true,
+  "totp_issuer": "Claude Panel",
+  "totp_account": "panel",
+  "host": "127.0.0.1",
+  "port": 8787,
+  "staticdir": "../frontend",
+  "workdir": "/home/USUARIO",
+  "model": null
+}

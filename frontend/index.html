@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel Claude</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div id="login">
+    <div class="card">
+      <h1>Panel Claude</h1>
+      <p>Acceso al agente de esta VPS</p>
+      <input id="pw" type="password" placeholder="Contraseña" autofocus>
+      <input id="code" class="hidden" type="text" inputmode="numeric" autocomplete="one-time-code"
+             maxlength="6" placeholder="Código 2FA (6 dígitos)" style="margin-top:10px;">
+      <button id="loginBtn">Entrar</button>
+      <div class="err" id="loginErr"></div>
+    </div>
+  </div>
+
+  <header class="hidden" id="app-header">
+    <span class="dot"></span><b>Claude</b>
+    <span class="meta" id="status">listo</span>
+    <span class="spacer"></span>
+    <button id="newBtn">Nueva conversación</button>
+  </header>
+
+  <div id="log" class="hidden"></div>
+
+  <footer class="hidden" id="app-footer">
+    <div class="inputrow">
+      <textarea id="input" placeholder="Escribe… (Enter envía, Shift+Enter salto de línea)"></textarea>
+      <button class="send" id="sendBtn">Enviar</button>
+    </div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
