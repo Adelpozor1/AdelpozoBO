@@ -104,6 +104,32 @@ Claude corre con `--dangerously-skip-permissions` también aquí (autonomía tot
 dentro del proyecto). API: `GET /api/projects`, `POST /api/projects/{clone,pull,
 checkout,delete}`, `GET /api/projects/branches`.
 
+## Monitorización (segunda VPS por SSH)
+
+La pestaña **Monitorización** da un informe casi instantáneo de otra VPS (la que
+tiene n8n + PostgreSQL en Docker). El panel se conecta por **SSH con clave** y
+ejecuta un recolector en una sola conexión; muestra cuatro tarjetas:
+
+- **Sistema**: CPU, memoria, disco, carga, uptime y top de procesos.
+- **Docker**: contenedores, estado y uso de CPU/memoria por contenedor.
+- **n8n**: healthcheck, workflows activos y ejecuciones de las últimas 24 h
+  (éxito/error) con las últimas ejecuciones (consultando la BD de n8n).
+- **PostgreSQL**: estado (`pg_isready`), tamaño de la BD, conexiones y versión.
+
+**Requisito**: el usuario del panel (el de systemd) debe poder entrar por SSH a
+la otra VPS **sin contraseña** (clave autorizada). Si usas una clave concreta,
+indícala en el campo *Ruta a la clave SSH*.
+
+Desde la web: **+ Host** → nombre, usuario/IP/puerto SSH y nombres de los
+contenedores de n8n y PostgreSQL (el botón **Probar conexión** lista los
+contenedores en marcha para que copies sus nombres). Activa **Auto (10s)** para
+refresco continuo. Los hosts se guardan en `backend/monitor.json` (permisos 600,
+no se sube a git); la contraseña de la BD, si la pones, nunca se devuelve al
+navegador.
+
+API: `GET /api/monitor/hosts`, `GET /api/monitor/report?host=<id>`,
+`POST /api/monitor/{hosts/save,hosts/delete,test}`.
+
 ## Persistencia (systemd)
 
 ```bash

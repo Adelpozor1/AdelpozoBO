@@ -94,11 +94,13 @@ function showDev(screen) {
 function setSection(s) {
   const dev = s === "dev";
   $("#tabDev").classList.toggle("active", dev);
+  $("#tabMon").classList.toggle("active", !dev);
   $("#mon-view").classList.toggle("hidden", dev);
-  if (dev) showDev(devScreen);
-  else ["#clients-view", "#projects-view", "#main-row"].forEach(id => $(id).classList.add("hidden"));
+  if (dev) { monStop(); showDev(devScreen); }
+  else { ["#clients-view", "#projects-view", "#main-row"].forEach(id => $(id).classList.add("hidden")); monEnter(); }
 }
 $("#tabDev").onclick = () => setSection("dev");
+$("#tabMon").onclick = () => setSection("mon");
 
 // ---- clientes ----
 async function loadClients() {
@@ -510,11 +512,231 @@ $("#saveGhBtn").onclick = saveGithubToken;
 // --------------------------------------------------------------------------- //
 $("#logoutBtn").onclick = async () => {
   try { await fetch("/api/logout", {method: "POST"}); } catch (e) {}
+  monStop();
   current = selClient = selProject = null;
   $("#app-header").classList.add("hidden");
-  ["#clients-view", "#projects-view", "#main-row", "#mon-view"].forEach(id => $(id).classList.add("hidden"));
+  ["#clients-view", "#projects-view", "#main-row", "#mon-view", "#monHost"].forEach(id => $(id).classList.add("hidden"));
   $("#login").classList.remove("hidden");
   $("#pw").value = ""; $("#code").value = ""; $("#loginErr").textContent = ""; $("#pw").focus();
+};
+
+// --------------------------------------------------------------------------- //
+// Monitorización: hosts SSH + informe en vivo (sistema / Docker / n8n / BD)
+// --------------------------------------------------------------------------- //
+let monHosts = [], monSel = null, monTimer = null, monLoading = false, monInited = false;
+
+function fmtBytes(n) {
+  if (n == null) return "—";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; n = Number(n);
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(n < 10 && i > 0 ? 1 : 0) + " " + u[i];
+}
+function fmtUptime(sec) {
+  if (!sec) return "—"; sec = Math.floor(sec);
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+  return (d ? d + "d " : "") + (h ? h + "h " : "") + m + "m";
+}
+function barCls(p) { return p == null ? "" : p >= 90 ? "bad" : p >= 70 ? "warn" : ""; }
+function metric(label, valTxt, pct) {
+  const w = pct == null ? 0 : Math.min(100, pct);
+  return `<div class="metric"><div class="ml"><span>${esc(label)}</span><b>${esc(valTxt)}</b></div>` +
+         `<div class="bar ${barCls(pct)}"><span style="width:${w}%"></span></div></div>`;
+}
+function kv(k, v) { return `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`; }
+const STATUS_CLS = { success: "ok", error: "bad", crashed: "bad", running: "run", waiting: "run", new: "run" };
+
+async function monEnter() {
+  if (!monInited) { monInited = true; await monLoadHosts(); }
+  if (monSel) { monRender(null); monFetch(); }
+  if ($("#monAuto").checked) monStartTimer();
+}
+function monStop() { if (monTimer) { clearInterval(monTimer); monTimer = null; } }
+function monStartTimer() { monStop(); monTimer = setInterval(monFetch, 10000); }
+
+async function monLoadHosts() {
+  try { monHosts = (await (await fetch("/api/monitor/hosts")).json()).hosts || []; }
+  catch (e) { monHosts = []; }
+  const sel = $("#monHostSel"); sel.innerHTML = "";
+  for (const h of monHosts) { const o = document.createElement("option"); o.value = h.id; o.textContent = h.name; sel.appendChild(o); }
+  const saved = localStorage.getItem("monHost");
+  monSel = monHosts.find(h => h.id === saved) ? saved : (monHosts[0] ? monHosts[0].id : null);
+  if (monSel) sel.value = monSel;
+  const has = monHosts.length > 0;
+  $("#monGrid").classList.toggle("hidden", !has);
+  $("#monEmpty").classList.toggle("hidden", has);
+  ["#monRefresh", "#monAuto", "#monEditBtn", "#monHostSel"].forEach(id => $(id).disabled = !has);
+}
+$("#monHostSel").onchange = e => { monSel = e.target.value; localStorage.setItem("monHost", monSel); monRender(null); monFetch(); };
+$("#monRefresh").onclick = () => monFetch();
+$("#monAuto").onchange = e => { if (e.target.checked) { monStartTimer(); monFetch(); } else monStop(); };
+
+async function monFetch() {
+  if (!monSel || monLoading) return;
+  monLoading = true; $("#monStatus").textContent = "actualizando…";
+  try {
+    const r = await fetch("/api/monitor/report?host=" + encodeURIComponent(monSel));
+    const j = await r.json();
+    if (!j.ok) { $("#monStatus").textContent = "✗ " + (j.error || "error"); monRenderError(j.error); }
+    else { monRender(j); $("#monStatus").textContent = "✓ " + new Date().toLocaleTimeString(); }
+  } catch (e) { $("#monStatus").textContent = "✗ sin conexión"; }
+  finally { monLoading = false; }
+}
+function monRenderError(err) {
+  $("#cardSys").querySelector(".mc-body").innerHTML =
+    `<div class="mc-err">No se pudo conectar por SSH:</div><div class="mc-muted">${esc(err || "")}</div>` +
+    `<div class="mc-muted" style="margin-top:8px">Comprueba que el panel tiene acceso SSH por clave a esta VPS (usuario, host, puerto y la clave autorizada).</div>`;
+  ["#cardDocker", "#cardN8n", "#cardDb"].forEach(id => $(id).querySelector(".mc-body").innerHTML = '<div class="mc-muted">—</div>');
+}
+
+function monRender(j) {
+  if (!j) { ["#cardSys", "#cardDocker", "#cardN8n", "#cardDb"].forEach(id => $(id).querySelector(".mc-body").innerHTML = '<div class="mc-muted">cargando…</div>'); return; }
+  renderSys(j.system); renderDocker(j.docker); renderN8n(j.n8n); renderDb(j.db);
+}
+
+function renderSys(s) {
+  if (!s) return;
+  let h = "";
+  h += metric("CPU", s.cpu_pct == null ? "n/d" : s.cpu_pct + "%", s.cpu_pct);
+  if (s.mem) h += metric("Memoria", `${fmtBytes(s.mem.used)} / ${fmtBytes(s.mem.total)}`, s.mem.pct);
+  for (const d of (s.disk || [])) h += metric("Disco " + d.mount, `${fmtBytes(d.used)} / ${fmtBytes(d.size)}`, d.pct);
+  h += '<div class="mc-sub">Detalles</div>';
+  h += kv("Host", esc(s.hostname || "—"));
+  h += kv("Kernel", esc(s.kernel || "—"));
+  h += kv("Uptime", fmtUptime(s.uptime));
+  h += kv("Carga", (s.loadavg || []).join("  ") + (s.ncpu ? `  <span class="mc-muted">(${s.ncpu} CPU)</span>` : ""));
+  if (s.top && s.top.length) {
+    h += '<div class="mc-sub">Top procesos (CPU)</div><table class="mtable"><tr><th>Proceso</th><th class="num">%CPU</th><th class="num">%MEM</th></tr>';
+    for (const p of s.top.slice(0, 5)) h += `<tr><td class="nm">${esc(p.cmd)}</td><td class="num">${esc(p.cpu)}</td><td class="num">${esc(p.mem)}</td></tr>`;
+    h += "</table>";
+  }
+  $("#cardSys").querySelector(".mc-body").innerHTML = h;
+}
+
+function renderDocker(d) {
+  const body = $("#cardDocker").querySelector(".mc-body");
+  if (!d || !d.available) { body.innerHTML = '<div class="mc-muted">Docker no disponible en esta VPS.</div>'; return; }
+  if (!d.containers.length) { body.innerHTML = '<div class="mc-muted">Sin contenedores.</div>'; return; }
+  const up = d.containers.filter(c => /^up/i.test(c.status || "") || c.state === "running").length;
+  let h = `<div class="mc-muted">${up}/${d.containers.length} en ejecución</div>`;
+  h += '<table class="mtable"><tr><th>Contenedor</th><th>Estado</th><th class="num">CPU</th><th class="num">MEM</th></tr>';
+  for (const c of d.containers) {
+    const run = /^up/i.test(c.status || "") || c.state === "running";
+    h += `<tr><td class="nm" title="${esc(c.image)}">${esc(c.name)}</td>` +
+         `<td><span class="pill ${run ? "ok" : "bad"}">${esc((c.status || c.state || "?").slice(0, 24))}</span></td>` +
+         `<td class="num">${esc(c.cpu || "—")}</td><td class="num">${esc(c.mem || "—")}</td></tr>`;
+  }
+  body.innerHTML = h + "</table>";
+}
+
+function renderN8n(n) {
+  const body = $("#cardN8n").querySelector(".mc-body");
+  if (!n) { body.innerHTML = '<div class="mc-muted">—</div>'; return; }
+  let h = "";
+  const hc = n.health_ok ? "ok" : (n.health ? "bad" : "warn");
+  h += kv("Healthcheck", `<span class="sdot ${hc}"></span>${n.health ? esc(n.health) : "n/d"}`);
+  h += kv("Workflows activos", n.active == null ? "n/d" : `${n.active}${n.total_workflows != null ? " / " + n.total_workflows : ""}`);
+  if (!n.db_ok) { h += '<div class="mc-muted" style="margin-top:8px">Ejecuciones: sin acceso a la BD (revisa contenedor/credenciales de PostgreSQL).</div>'; body.innerHTML = h; return; }
+  const ex = n.exec24 || {}; const keys = Object.keys(ex);
+  h += '<div class="mc-sub">Ejecuciones (24h)</div>';
+  if (!keys.length) h += '<div class="mc-muted">Sin ejecuciones en las últimas 24h.</div>';
+  else { h += '<div>'; for (const k of keys) h += `<span class="pill ${STATUS_CLS[k] || ""}" style="margin-right:6px">${esc(k)}: ${ex[k]}</span>`; h += "</div>"; }
+  if (n.recent && n.recent.length) {
+    h += '<div class="mc-sub">Últimas ejecuciones</div><table class="mtable"><tr><th>Workflow</th><th>Estado</th><th>Inicio</th></tr>';
+    for (const e of n.recent) h += `<tr><td class="nm">${esc(e.workflow)}</td><td><span class="pill ${STATUS_CLS[e.status] || ""}">${esc(e.status)}</span></td><td class="mc-muted">${esc(e.started)}</td></tr>`;
+    h += "</table>";
+  }
+  body.innerHTML = h;
+}
+
+function renderDb(d) {
+  const body = $("#cardDb").querySelector(".mc-body");
+  if (!d || (!d.configured && d.size == null && d.conns == null)) { body.innerHTML = '<div class="mc-muted">Sin contenedor de BD configurado.</div>'; return; }
+  let h = "";
+  h += kv("Estado", `<span class="sdot ${d.ready ? "ok" : "bad"}"></span>${d.ready ? "aceptando conexiones" : esc((d.isready || "no responde").slice(0, 40))}`);
+  h += kv("Tamaño BD", d.size ? esc(d.size) : "n/d");
+  h += kv("Conexiones activas", d.conns == null ? "n/d" : d.conns);
+  h += kv("Versión", d.version ? esc(d.version) : "n/d");
+  body.innerHTML = h;
+}
+
+// ---- modal de configuración de host ----
+function monOpenHost(host) {
+  $("#mhMsg").textContent = ""; $("#mhTestOut").classList.add("hidden"); $("#mhTestOut").innerHTML = "";
+  const f = id => $(id);
+  f("#mhId").value = host ? host.id : "";
+  f("#mhName").value = host ? host.name : "";
+  f("#mhUser").value = host ? host.ssh_user : "";
+  f("#mhHost").value = host ? host.ssh_host : "";
+  f("#mhPort").value = host ? host.ssh_port : 22;
+  f("#mhKey").value = host ? (host.identity_file || "") : "";
+  f("#mhN8nContainer").value = host ? (host.n8n_container || "") : "n8n";
+  f("#mhN8nUrl").value = host ? (host.n8n_url || "") : "http://localhost:5678";
+  f("#mhDbContainer").value = host ? (host.db_container || "") : "";
+  f("#mhDbName").value = host ? (host.db_name || "") : "n8n";
+  f("#mhDbUser").value = host ? (host.db_user || "") : "postgres";
+  f("#mhDbPass").value = "";
+  f("#mhDbPass").placeholder = host && host.db_password_set ? "•••••• (guardada — deja vacío para mantener)" : "contraseña BD (si hace falta)";
+  $("#monHostTitle").textContent = host ? "Editar: " + host.name : "Nueva VPS";
+  $("#mhDelBtn").classList.toggle("hidden", !host);
+  $("#monHost").classList.remove("hidden"); $("#mhName").focus();
+}
+$("#monAddBtn").onclick = () => monOpenHost(null);
+$("#monAddBtn2").onclick = () => monOpenHost(null);
+$("#monEditBtn").onclick = () => { const h = monHosts.find(x => x.id === monSel); if (h) monOpenHost(h); };
+$("#mhCancelBtn").onclick = () => $("#monHost").classList.add("hidden");
+
+function mhPayload() {
+  const p = {
+    id: $("#mhId").value, name: $("#mhName").value.trim(),
+    ssh_user: $("#mhUser").value.trim(), ssh_host: $("#mhHost").value.trim(),
+    ssh_port: $("#mhPort").value || 22, identity_file: $("#mhKey").value.trim(),
+    n8n_container: $("#mhN8nContainer").value.trim(), n8n_url: $("#mhN8nUrl").value.trim(),
+    db_container: $("#mhDbContainer").value.trim(), db_name: $("#mhDbName").value.trim(),
+    db_user: $("#mhDbUser").value.trim(),
+  };
+  if ($("#mhDbPass").value) p.db_password = $("#mhDbPass").value;
+  return p;
+}
+async function mhSave(payload) {
+  const r = await fetch("/api/monitor/hosts/save", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { $("#mhMsg").textContent = j.error || "No se pudo guardar"; return null; }
+  return j.host;
+}
+$("#mhSaveBtn").onclick = async () => {
+  $("#mhMsg").textContent = "";
+  const saved = await mhSave(mhPayload());
+  if (!saved) return;
+  $("#monHost").classList.add("hidden");
+  monSel = saved.id; localStorage.setItem("monHost", monSel);
+  await monLoadHosts(); $("#monHostSel").value = monSel; monRender(null); monFetch();
+};
+$("#mhTestBtn").onclick = async () => {
+  const out = $("#mhTestOut"); out.classList.remove("hidden"); out.innerHTML = "Probando…";
+  // guarda primero (test necesita el host en el servidor)
+  const saved = await mhSave(mhPayload());
+  if (!saved) { out.innerHTML = '<span class="mc-err">Corrige los campos antes de probar.</span>'; return; }
+  $("#mhId").value = saved.id;
+  try {
+    const r = await fetch("/api/monitor/test", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: saved.id}) });
+    const j = await r.json();
+    if (!j.ok) { out.innerHTML = `<span class="mc-err">✗ ${esc(j.error || "fallo")}</span>`; return; }
+    let h = `<div><span class="sdot ok"></span><b>${esc(j.hostname || "conectado")}</b></div>`;
+    if (j.containers && j.containers.length) {
+      h += '<div class="mc-muted" style="margin-top:6px">Contenedores (usa estos nombres arriba):</div>';
+      for (const c of j.containers) h += `<div class="kv"><span class="k">${esc(c.name)}</span><span class="v mc-muted">${esc(c.status)}</span></div>`;
+    } else h += '<div class="mc-muted" style="margin-top:6px">SSH OK. Docker sin contenedores o no instalado.</div>';
+    out.innerHTML = h;
+    await monLoadHosts(); $("#monHostSel").value = monSel = saved.id;
+  } catch (e) { out.innerHTML = '<span class="mc-err">Error de conexión</span>'; }
+};
+$("#mhDelBtn").onclick = async () => {
+  const id = $("#mhId").value; if (!id) return;
+  if (!confirm("¿Borrar este host de monitorización?")) return;
+  await fetch("/api/monitor/hosts/delete", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id}) });
+  $("#monHost").classList.add("hidden");
+  monSel = null; localStorage.removeItem("monHost");
+  await monLoadHosts(); monRender(null); if (monSel) monFetch();
 };
 
 checkAuth();

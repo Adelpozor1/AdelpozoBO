@@ -402,6 +402,301 @@ def make_cookie(token: str, max_age: int) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Monitorización de una segunda VPS por SSH.
+#
+# El panel ejecuta un recolector (bash) en la VPS remota vía SSH (clave), en una
+# sola conexión, y devuelve un informe estructurado: sistema (CPU/RAM/disco),
+# Docker, n8n (ejecuciones) y PostgreSQL. Los datos del host (contenedores,
+# credenciales de BD) se inyectan en el script en base64 para evitar inyección
+# de comandos. La lista de hosts vive en monitor.json (permisos 600).
+# --------------------------------------------------------------------------- #
+MON_PATH = BASE / "monitor.json"
+_mon_lock = threading.Lock()
+
+
+def _load_monitor() -> dict:
+    try:
+        d = json.loads(MON_PATH.read_text())
+        if isinstance(d, dict) and isinstance(d.get("hosts"), list):
+            return d
+    except Exception:
+        pass
+    return {"hosts": []}
+
+
+_monitor = _load_monitor()
+
+
+def _save_monitor_locked() -> None:
+    try:
+        MON_PATH.write_text(json.dumps(_monitor, indent=2))
+        os.chmod(MON_PATH, 0o600)
+    except Exception:
+        pass
+
+
+def _slug(s: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9]+", "-", (s or "").lower()).strip("-")
+    return s or "host"
+
+
+def _host_public(h: dict) -> dict:
+    """Versión del host sin la contraseña de BD (no sale del servidor)."""
+    pub = {k: v for k, v in h.items() if k != "db_password"}
+    pub["db_password_set"] = bool(h.get("db_password"))
+    return pub
+
+
+def ssh_run(host: dict, script: str, timeout: int = 30):
+    """Ejecuta `script` (bash) en la VPS remota por SSH. Sin prompts (BatchMode):
+    requiere clave autorizada. Devuelve (returncode, stdout, stderr)."""
+    target = f'{host["ssh_user"]}@{host["ssh_host"]}'
+    args = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
+            "-p", str(host.get("ssh_port") or 22)]
+    idf = host.get("identity_file")
+    if idf:
+        args += ["-i", os.path.expanduser(idf)]
+    args += [target, "bash -s"]
+    try:
+        p = subprocess.run(args, input=script, capture_output=True, text=True,
+                           timeout=timeout, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", "tiempo de espera agotado (SSH)"
+    except FileNotFoundError:
+        return 127, "", "ssh no está instalado"
+
+
+# Recolector remoto: imprime secciones marcadas con @@<nombre>. Los valores del
+# host se inyectan en base64 (__..._B64__) y se decodifican en la VPS.
+COLLECTOR_TMPL = r'''set +e
+export LC_ALL=C
+DBC="$(printf %s '__DBC_B64__' | base64 -d 2>/dev/null)"
+DBU="$(printf %s '__DBU_B64__' | base64 -d 2>/dev/null)"
+DBN="$(printf %s '__DBN_B64__' | base64 -d 2>/dev/null)"
+DBP="$(printf %s '__DBP_B64__' | base64 -d 2>/dev/null)"
+N8URL="$(printf %s '__N8URL_B64__' | base64 -d 2>/dev/null)"
+psqlq() {
+  if [ -n "$DBC" ]; then
+    docker exec -e PGPASSWORD="$DBP" "$DBC" psql -U "$DBU" -d "$DBN" -tAF '|' -c "$1" 2>&1
+  else
+    echo "sin-contenedor-db"
+  fi
+}
+echo "@@uptime";    cat /proc/uptime 2>&1
+echo "@@loadavg";   cat /proc/loadavg 2>&1
+echo "@@meminfo";   cat /proc/meminfo 2>&1
+echo "@@cpu1";      head -1 /proc/stat 2>&1
+sleep 0.25
+echo "@@cpu2";      head -1 /proc/stat 2>&1
+echo "@@nproc";     nproc 2>&1
+echo "@@disk";      df -P -B1 -x tmpfs -x devtmpfs 2>&1
+echo "@@uname";     uname -sr 2>&1
+echo "@@hostname";  hostname 2>&1
+echo "@@ps";        ps -eo pid,comm,pcpu,pmem --sort=-pcpu 2>/dev/null | head -8
+echo "@@docker_ps"; (command -v docker >/dev/null && docker ps -a --format '{{json .}}' 2>&1) || echo "sin-docker"
+echo "@@docker_stats"; (command -v docker >/dev/null && docker stats --no-stream --format '{{json .}}' 2>&1)
+echo "@@n8n_health"; if [ -n "$N8URL" ]; then curl -s -m 5 -o /dev/null -w '%{http_code}' "$N8URL/healthz" 2>&1 || echo "err"; fi
+echo "@@db_isready"; if [ -n "$DBC" ]; then docker exec "$DBC" pg_isready 2>&1; fi
+echo "@@db_size";    psqlq "SELECT pg_size_pretty(pg_database_size(current_database()))"
+echo "@@db_conns";   psqlq "SELECT count(*) FROM pg_stat_activity"
+echo "@@db_version"; psqlq "SHOW server_version"
+echo "@@n8n_exec24"; psqlq "SELECT COALESCE(status::text,'unknown') AS s, count(*) FROM execution_entity WHERE \"startedAt\" > now() - interval '24 hours' GROUP BY 1 ORDER BY 2 DESC"
+echo "@@n8n_active"; psqlq "SELECT count(*) FROM workflow_entity WHERE active=true"
+echo "@@n8n_total";  psqlq "SELECT count(*) FROM workflow_entity"
+echo "@@n8n_recent"; psqlq "SELECT e.id, COALESCE(w.name,'(borrado)'), COALESCE(e.status::text, CASE WHEN e.finished THEN 'success' ELSE 'unknown' END), to_char(e.\"startedAt\",'YYYY-MM-DD HH24:MI') FROM execution_entity e LEFT JOIN workflow_entity w ON w.id::text=e.\"workflowId\"::text ORDER BY e.\"startedAt\" DESC LIMIT 10"
+echo "@@end"
+'''
+
+
+def build_collector(h: dict) -> str:
+    def b64(s):
+        return base64.b64encode(str(s or "").encode()).decode()
+    return (COLLECTOR_TMPL
+            .replace("__DBC_B64__", b64(h.get("db_container")))
+            .replace("__DBU_B64__", b64(h.get("db_user") or "postgres"))
+            .replace("__DBN_B64__", b64(h.get("db_name")))
+            .replace("__DBP_B64__", b64(h.get("db_password")))
+            .replace("__N8URL_B64__", b64(h.get("n8n_url") or "http://localhost:5678")))
+
+
+def _split_sections(raw: str) -> dict:
+    sec, cur = {}, None
+    for line in raw.splitlines():
+        if line.startswith("@@"):
+            cur = line[2:].strip()
+            sec[cur] = []
+        elif cur is not None:
+            sec[cur].append(line)
+    return sec
+
+
+def _txt(sec: dict, key: str) -> str:
+    return "\n".join(sec.get(key, [])).strip()
+
+
+def _psql_failed(s: str) -> bool:
+    """True si la salida es un error (de psql/docker) en vez de datos."""
+    if not s or s in ("sin-contenedor-db", "sin-docker"):
+        return True
+    markers = ["psql:", "ERROR:", "FATAL:", "could not connect", "Is the server running",
+               "No such container", "Error response from daemon", "Cannot connect to the Docker",
+               "does not exist", "command not found", "permission denied", "role \""]
+    return any(m in s for m in markers)
+
+
+def _cpu_pct(sec: dict):
+    try:
+        a = list(map(int, sec["cpu1"][0].split()[1:]))
+        b = list(map(int, sec["cpu2"][0].split()[1:]))
+        idle_a = a[3] + (a[4] if len(a) > 4 else 0)
+        idle_b = b[3] + (b[4] if len(b) > 4 else 0)
+        dt, di = sum(b) - sum(a), idle_b - idle_a
+        return round(100.0 * (dt - di) / dt, 1) if dt > 0 else None
+    except Exception:
+        return None
+
+
+def _mem(sec: dict) -> dict:
+    d = {}
+    for line in sec.get("meminfo", []):
+        m = re.match(r"(\w+):\s+(\d+)", line)
+        if m:
+            d[m.group(1)] = int(m.group(2))  # kB
+    tot = d.get("MemTotal", 0)
+    avail = d.get("MemAvailable", d.get("MemFree", 0))
+    used = max(0, tot - avail)
+    return {"total": tot * 1024, "used": used * 1024,
+            "pct": round(100.0 * used / tot, 1) if tot else None}
+
+
+def _disk(sec: dict) -> list:
+    out, seen = [], set()
+    for line in sec.get("disk", [])[1:]:
+        f = line.split()
+        if len(f) < 6:
+            continue
+        try:
+            size, used = int(f[1]), int(f[2])
+        except ValueError:
+            continue
+        mount = " ".join(f[5:])
+        if size <= 0 or mount in seen:
+            continue
+        seen.add(mount)
+        out.append({"fs": f[0], "size": size, "used": used,
+                    "pct": round(100.0 * used / size, 1) if size else 0, "mount": mount})
+    out.sort(key=lambda x: -x["size"])
+    return out[:8]
+
+
+def _top(sec: dict) -> list:
+    out = []
+    for line in sec.get("ps", [])[1:]:
+        f = line.split(None, 3)
+        if len(f) >= 4:
+            out.append({"pid": f[0], "cmd": f[1], "cpu": f[2], "mem": f[3]})
+    return out
+
+
+def _docker(sec: dict) -> dict:
+    ps_lines = sec.get("docker_ps", [])
+    if any("sin-docker" in l for l in ps_lines):
+        return {"available": False, "containers": []}
+    conts = {}
+    for l in ps_lines:
+        l = l.strip()
+        if not l.startswith("{"):
+            continue
+        try:
+            j = json.loads(l)
+        except Exception:
+            continue
+        name = j.get("Names") or j.get("Name") or ""
+        conts[name] = {"name": name, "image": j.get("Image", ""),
+                       "status": j.get("Status", ""), "state": j.get("State", ""),
+                       "cpu": None, "mem": None, "memusage": ""}
+    for l in sec.get("docker_stats", []):
+        l = l.strip()
+        if not l.startswith("{"):
+            continue
+        try:
+            j = json.loads(l)
+        except Exception:
+            continue
+        name = j.get("Name") or j.get("Names") or ""
+        if name in conts:
+            conts[name]["cpu"] = j.get("CPUPerc", "")
+            conts[name]["mem"] = j.get("MemPerc", "")
+            conts[name]["memusage"] = j.get("MemUsage", "")
+    return {"available": True, "containers": list(conts.values())}
+
+
+def _n8n(sec: dict) -> dict:
+    health = _txt(sec, "n8n_health")
+    exec_raw = _txt(sec, "n8n_exec24")
+    statuses = {}
+    db_ok = not _psql_failed(exec_raw)
+    if db_ok:
+        for line in exec_raw.splitlines():
+            p = line.split("|")
+            if len(p) >= 2 and p[-1].strip().isdigit():
+                statuses[(p[0].strip() or "?")] = int(p[-1])
+    recent = []
+    rec_raw = _txt(sec, "n8n_recent")
+    if not _psql_failed(rec_raw):
+        for line in rec_raw.splitlines():
+            p = line.split("|")
+            if len(p) >= 4:
+                recent.append({"id": p[0].strip(), "workflow": p[1].strip(),
+                               "status": p[2].strip(), "started": p[3].strip()})
+
+    def num(key):
+        v = _txt(sec, key)
+        return int(v) if v.isdigit() else None
+
+    return {"health": health, "health_ok": health == "200",
+            "exec24": statuses, "active": num("n8n_active"),
+            "total_workflows": num("n8n_total"), "recent": recent, "db_ok": db_ok}
+
+
+def _db(sec: dict) -> dict:
+    isready = _txt(sec, "db_isready")
+    size = _txt(sec, "db_size")
+    conns = _txt(sec, "db_conns")
+    ver = _txt(sec, "db_version")
+    return {"isready": isready,
+            "ready": "accepting connections" in isready,
+            "configured": isready != "" or size != "",
+            "size": None if _psql_failed(size) else size,
+            "conns": int(conns) if conns.isdigit() else None,
+            "version": None if _psql_failed(ver) else ver}
+
+
+def parse_report(raw: str, host: dict) -> dict:
+    sec = _split_sections(raw)
+    try:
+        up = float(_txt(sec, "uptime").split()[0])
+    except Exception:
+        up = 0.0
+    try:
+        load = [float(x) for x in _txt(sec, "loadavg").split()[:3]]
+    except Exception:
+        load = []
+    try:
+        ncpu = int(_txt(sec, "nproc"))
+    except Exception:
+        ncpu = None
+    system = {"hostname": _txt(sec, "hostname"), "kernel": _txt(sec, "uname"),
+              "uptime": up, "loadavg": load, "ncpu": ncpu,
+              "cpu_pct": _cpu_pct(sec), "mem": _mem(sec),
+              "disk": _disk(sec), "top": _top(sec)}
+    return {"system": system, "docker": _docker(sec), "n8n": _n8n(sec), "db": _db(sec)}
+
+
+# --------------------------------------------------------------------------- #
 # Handler
 # --------------------------------------------------------------------------- #
 class Handler(BaseHTTPRequestHandler):
@@ -476,6 +771,14 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._repo_branches(q.get("client", [""])[0], q.get("project", [""])[0],
                                     q.get("name", [""])[0])
+        elif path in ("/api/monitor/hosts", "/api/monitor/report"):
+            if not self._is_authed():
+                return self._json(401, {"error": "no autorizado"})
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            if path == "/api/monitor/hosts":
+                self._mon_hosts()
+            else:
+                self._mon_report(q.get("host", [""])[0])
         else:
             self._send(404, b"not found", "text/plain")
 
@@ -507,6 +810,9 @@ class Handler(BaseHTTPRequestHandler):
             "/api/repos/checkout": self._repo_checkout,
             "/api/repos/delete": self._repo_delete,
             "/api/repos/rename": self._repo_rename,
+            "/api/monitor/hosts/save": self._mon_host_save,
+            "/api/monitor/hosts/delete": self._mon_host_delete,
+            "/api/monitor/test": self._mon_test,
         }
         if self.path in routes:
             return routes[self.path]()
@@ -592,6 +898,113 @@ class Handler(BaseHTTPRequestHandler):
         CFG["github_token"] = tok
         save_config(CFG)
         self._json(200, {"ok": True, "set": bool(tok)})
+
+    # -- monitorización (VPS remota por SSH) ------------------------------- #
+    def _mon_hosts(self):
+        with _mon_lock:
+            hosts = [_host_public(h) for h in _monitor["hosts"]]
+        self._json(200, {"hosts": hosts})
+
+    def _mon_find(self, hid):
+        with _mon_lock:
+            return next((dict(x) for x in _monitor["hosts"] if x["id"] == hid), None)
+
+    def _mon_host_save(self):
+        d = self._read_body()
+        name = str(d.get("name", "")).strip()
+        ssh_user = str(d.get("ssh_user", "")).strip()
+        ssh_host = str(d.get("ssh_host", "")).strip()
+        if not name:
+            return self._json(400, {"error": "pon un nombre"})
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", ssh_user or ""):
+            return self._json(400, {"error": "usuario SSH no válido"})
+        if not re.fullmatch(r"[A-Za-z0-9._:-]+", ssh_host or ""):
+            return self._json(400, {"error": "host SSH no válido (IP o dominio)"})
+        try:
+            port = int(d.get("ssh_port") or 22)
+        except (TypeError, ValueError):
+            return self._json(400, {"error": "puerto no válido"})
+        if not (1 <= port <= 65535):
+            return self._json(400, {"error": "puerto fuera de rango"})
+        idf = str(d.get("identity_file", "")).strip()
+        if idf and not re.fullmatch(r"[A-Za-z0-9._/~-]+", idf):
+            return self._json(400, {"error": "ruta de clave SSH no válida"})
+        n8n_url = str(d.get("n8n_url", "")).strip()
+        if n8n_url and not re.fullmatch(r"https?://[A-Za-z0-9._:/\-]+", n8n_url):
+            return self._json(400, {"error": "URL de n8n no válida"})
+        for fld, label in [("n8n_container", "contenedor n8n"), ("db_container", "contenedor BD"),
+                           ("db_user", "usuario BD"), ("db_name", "nombre de BD")]:
+            v = str(d.get(fld, "")).strip()
+            if v and not re.fullmatch(r"[A-Za-z0-9._-]+", v):
+                return self._json(400, {"error": f"{label} no válido"})
+        hid = str(d.get("id", "")).strip() or None
+        with _mon_lock:
+            existing = next((h for h in _monitor["hosts"] if h["id"] == hid), None) if hid else None
+            if not existing:
+                base = _slug(name)
+                ids = {h["id"] for h in _monitor["hosts"]}
+                hid, i = base, 2
+                while hid in ids:
+                    hid, i = f"{base}-{i}", i + 1
+                existing = {"id": hid, "db_password": ""}
+                _monitor["hosts"].append(existing)
+            existing.update({
+                "id": hid, "name": name, "ssh_user": ssh_user, "ssh_host": ssh_host,
+                "ssh_port": port, "identity_file": idf,
+                "n8n_url": n8n_url or "http://localhost:5678",
+                "n8n_container": str(d.get("n8n_container", "")).strip() or "n8n",
+                "db_container": str(d.get("db_container", "")).strip(),
+                "db_user": str(d.get("db_user", "")).strip() or "postgres",
+                "db_name": str(d.get("db_name", "")).strip(),
+            })
+            pw = d.get("db_password")
+            if isinstance(pw, str) and pw != "":
+                existing["db_password"] = pw
+            existing.setdefault("db_password", "")
+            _save_monitor_locked()
+            pub = _host_public(existing)
+        self._json(200, {"ok": True, "host": pub})
+
+    def _mon_host_delete(self):
+        hid = str(self._read_body().get("id", "")).strip()
+        with _mon_lock:
+            n = len(_monitor["hosts"])
+            _monitor["hosts"] = [h for h in _monitor["hosts"] if h["id"] != hid]
+            if len(_monitor["hosts"]) != n:
+                _save_monitor_locked()
+        self._json(200, {"ok": True})
+
+    def _mon_test(self):
+        h = self._mon_find(str(self._read_body().get("id", "")).strip())
+        if not h:
+            return self._json(404, {"error": "host no encontrado"})
+        script = ("echo @@host; hostname 2>&1\n"
+                  "echo @@containers; (command -v docker >/dev/null && "
+                  "docker ps --format '{{.Names}}|{{.Status}}' 2>&1) || echo sin-docker\n")
+        code, out, err = ssh_run(h, script, timeout=20)
+        if code != 0 and not out.strip():
+            return self._json(200, {"ok": False, "error": (err or "fallo de conexión SSH").strip()[:400]})
+        sec = _split_sections(out)
+        conts = []
+        for line in sec.get("containers", []):
+            if "|" in line:
+                nm, stt = line.split("|", 1)
+                conts.append({"name": nm.strip(), "status": stt.strip()})
+        self._json(200, {"ok": True, "hostname": _txt(sec, "host"), "containers": conts})
+
+    def _mon_report(self, hid):
+        h = self._mon_find(hid)
+        if not h:
+            return self._json(404, {"error": "host no encontrado"})
+        code, out, err = ssh_run(h, build_collector(h), timeout=30)
+        if code != 0 and not out.strip():
+            return self._json(200, {"ok": False, "host": h["id"],
+                                    "error": (err or "fallo de conexión SSH").strip()[:400]})
+        rep = parse_report(out, h)
+        rep.update(ok=True, host=h["id"], name=h["name"])
+        if err.strip():
+            rep["ssh_warn"] = err.strip()[:200]
+        self._json(200, rep)
 
     # -- jerarquía: clientes / proyectos / repos --------------------------- #
     def _repo_info(self, d: Path) -> dict:

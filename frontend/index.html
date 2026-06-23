@@ -23,7 +23,7 @@
     <span class="dot"></span><b>Claude</b>
     <nav id="sections">
       <button id="tabDev" class="tab active">Desarrollo</button>
-      <button id="tabMon" class="tab" disabled title="Próximamente">Monitorización</button>
+      <button id="tabMon" class="tab">Monitorización</button>
     </nav>
     <span class="meta" id="status">listo</span>
     <span class="spacer"></span>
@@ -89,10 +89,79 @@
   </div>
 
   <div id="mon-view" class="hidden">
-    <div class="placeholder">
-      <h2>Monitorización</h2>
-      <p>Estado de servicios, recursos y logs de la segunda VPS.</p>
-      <p class="muted">🚧 Sección en construcción — deshabilitada por ahora.</p>
+    <div class="mon-toolbar">
+      <select id="monHostSel" title="VPS a monitorizar"></select>
+      <button id="monRefresh" title="Actualizar ahora">↻ Actualizar</button>
+      <label class="mon-auto"><input type="checkbox" id="monAuto"> Auto (10s)</label>
+      <span id="monStatus" class="meta"></span>
+      <span class="spacer"></span>
+      <button id="monEditBtn" class="ghost" title="Editar host">✎ Editar</button>
+      <button id="monAddBtn">+ Host</button>
+    </div>
+    <div id="monBody">
+      <div id="monEmpty" class="placeholder hidden">
+        <h2>Monitorización</h2>
+        <p>Añade la segunda VPS (SSH por clave) para ver su estado en vivo.</p>
+        <p class="muted">Sistema · Docker · n8n · PostgreSQL</p>
+        <button id="monAddBtn2">+ Añadir VPS</button>
+      </div>
+      <div id="monGrid" class="mon-grid hidden">
+        <section class="mon-card" id="cardSys">
+          <h3>🖥️ Sistema</h3>
+          <div class="mc-body"></div>
+        </section>
+        <section class="mon-card" id="cardDocker">
+          <h3>🐳 Docker</h3>
+          <div class="mc-body"></div>
+        </section>
+        <section class="mon-card" id="cardN8n">
+          <h3>⚙️ n8n</h3>
+          <div class="mc-body"></div>
+        </section>
+        <section class="mon-card" id="cardDb">
+          <h3>🐘 PostgreSQL</h3>
+          <div class="mc-body"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: configurar host de monitorización -->
+  <div id="monHost" class="hidden">
+    <div class="card mon-card-modal">
+      <h1 id="monHostTitle">Nueva VPS</h1>
+      <p>Conexión SSH por clave (el panel debe poder entrar sin contraseña).</p>
+      <input type="hidden" id="mhId">
+      <input id="mhName" type="text" placeholder="Nombre (p.ej. VPS n8n)">
+      <div class="mh-row">
+        <input id="mhUser" type="text" placeholder="usuario SSH (root)">
+        <input id="mhHost" type="text" placeholder="IP o dominio">
+        <input id="mhPort" type="number" placeholder="22" value="22" class="mh-port">
+      </div>
+      <input id="mhKey" type="text" placeholder="Ruta a la clave SSH (opcional, p.ej. ~/.ssh/id_ed25519)">
+      <button id="mhTestBtn" class="secondary">Probar conexión</button>
+      <div id="mhTestOut" class="mh-test hidden"></div>
+
+      <h2 class="section">n8n</h2>
+      <div class="mh-row">
+        <input id="mhN8nContainer" type="text" placeholder="contenedor (n8n)">
+        <input id="mhN8nUrl" type="text" placeholder="http://localhost:5678">
+      </div>
+
+      <h2 class="section">PostgreSQL (contenedor Docker)</h2>
+      <div class="mh-row">
+        <input id="mhDbContainer" type="text" placeholder="contenedor (postgres)">
+        <input id="mhDbName" type="text" placeholder="base de datos (n8n)">
+      </div>
+      <div class="mh-row">
+        <input id="mhDbUser" type="text" placeholder="usuario BD (postgres)">
+        <input id="mhDbPass" type="password" placeholder="contraseña BD (si hace falta)">
+      </div>
+
+      <button id="mhSaveBtn">Guardar</button>
+      <button id="mhDelBtn" class="danger-btn hidden">Borrar host</button>
+      <button id="mhCancelBtn" class="secondary">Cancelar</button>
+      <div class="err" id="mhMsg"></div>
     </div>
   </div>
 
