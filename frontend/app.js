@@ -92,15 +92,20 @@ function showDev(screen) {
   $("#main-row").classList.toggle("hidden", screen !== "repos");
 }
 function setSection(s) {
-  const dev = s === "dev";
-  $("#tabDev").classList.toggle("active", dev);
-  $("#tabMon").classList.toggle("active", !dev);
-  $("#mon-view").classList.toggle("hidden", dev);
-  if (dev) { monStop(); showDev(devScreen); }
-  else { ["#clients-view", "#projects-view", "#main-row"].forEach(id => $(id).classList.add("hidden")); monEnter(); }
+  $("#tabDev").classList.toggle("active", s === "dev");
+  $("#tabMon").classList.toggle("active", s === "mon");
+  $("#tabLinear").classList.toggle("active", s === "linear");
+  $("#mon-view").classList.toggle("hidden", s !== "mon");
+  $("#linear-view").classList.toggle("hidden", s !== "linear");
+  const devIds = ["#clients-view", "#projects-view", "#main-row"];
+  if (s !== "dev") { monStop(); devIds.forEach(id => $(id).classList.add("hidden")); }
+  if (s === "dev") { monStop(); showDev(devScreen); }
+  else if (s === "mon") { monEnter(); }
+  else if (s === "linear") { linearEnter(); }
 }
 $("#tabDev").onclick = () => setSection("dev");
 $("#tabMon").onclick = () => setSection("mon");
+$("#tabLinear").onclick = () => setSection("linear");
 
 // ---- clientes ----
 async function loadClients() {
@@ -528,7 +533,8 @@ $("#logoutBtn").onclick = async () => {
   monStop();
   current = selClient = selProject = null;
   $("#app-header").classList.add("hidden");
-  ["#clients-view", "#projects-view", "#main-row", "#mon-view", "#monHost"].forEach(id => $(id).classList.add("hidden"));
+  ["#clients-view", "#projects-view", "#main-row", "#mon-view", "#linear-view", "#monHost"].forEach(id => $(id).classList.add("hidden"));
+  linearLoaded = false;
   $("#login").classList.remove("hidden");
   $("#pw").value = ""; $("#code").value = ""; $("#loginErr").textContent = ""; $("#pw").focus();
 };
@@ -751,5 +757,68 @@ $("#mhDelBtn").onclick = async () => {
   monSel = null; localStorage.removeItem("monHost");
   await monLoadHosts(); monRender(null); if (monSel) monFetch();
 };
+
+// ---- Linear (mi trabajo) -------------------------------------------------- //
+let linearLoaded = false;
+// orden de los grupos por tipo de estado (lo "en curso" arriba)
+const LINEAR_ORDER = { started: 0, unstarted: 1, backlog: 2, triage: 3, "": 4 };
+
+async function linearEnter() {
+  if (!linearLoaded) await linearFetch();
+}
+async function linearFetch() {
+  const meta = $("#linearMeta"), empty = $("#linearEmpty"), groups = $("#linearGroups");
+  meta.textContent = "cargando…"; empty.classList.add("hidden");
+  let j;
+  try { j = await (await fetch("/api/linear/issues")).json(); }
+  catch (e) { meta.textContent = ""; empty.classList.remove("hidden"); empty.textContent = "Error de conexión."; return; }
+  meta.textContent = "";
+  if (!j.ok) {
+    groups.innerHTML = ""; empty.classList.remove("hidden");
+    empty.innerHTML = esc(j.error || "No se pudo cargar Linear.") +
+      ' · Configura el token en <b>Perfil → Linear</b>.';
+    $("#linearUser").textContent = "";
+    return;
+  }
+  linearLoaded = true;
+  $("#linearUser").textContent = j.user || "";
+  const issues = j.issues || [];
+  if (!issues.length) {
+    groups.innerHTML = ""; empty.classList.remove("hidden");
+    empty.textContent = "Sin incidencias asignadas pendientes. 🎉";
+    return;
+  }
+  empty.classList.add("hidden");
+  // agrupa por estado
+  const byState = {};
+  for (const it of issues) (byState[it.state] = byState[it.state] || { type: it.stateType, color: it.stateColor, items: [] }).items.push(it);
+  const order = Object.entries(byState).sort((a, b) =>
+    (LINEAR_ORDER[a[1].type] ?? 9) - (LINEAR_ORDER[b[1].type] ?? 9) || a[0].localeCompare(b[0]));
+  let h = "";
+  for (const [state, g] of order) {
+    h += `<section class="lin-group"><h3><span class="lin-dot" style="background:${esc(g.color || "#888")}"></span>${esc(state)} <span class="lin-count">${g.items.length}</span></h3>`;
+    for (const it of g.items) {
+      const prio = it.priority && it.priority > 0 ? `<span class="lin-prio p${it.priority}">${esc(it.priorityLabel || "")}</span>` : "";
+      const proj = it.project ? `<span class="lin-tag">${esc(it.project)}</span>` : "";
+      h += `<a class="lin-card" href="${esc(it.url)}" target="_blank" rel="noopener">
+        <div class="lin-row"><span class="lin-id">${esc(it.team)}·${esc(it.id)}</span>${prio}</div>
+        <div class="lin-title">${esc(it.title)}</div>
+        <div class="lin-row">${proj}<span class="lin-when">${esc(when(it.updatedAt))}</span></div>
+      </a>`;
+    }
+    h += "</section>";
+  }
+  groups.innerHTML = h;
+  meta.textContent = issues.length + " incidencia(s)";
+}
+function when(iso) {
+  if (!iso) return "";
+  const d = new Date(iso), now = new Date(), ms = now - d, day = 864e5;
+  if (ms < 36e5) return "hace " + Math.max(1, Math.round(ms / 6e4)) + " min";
+  if (ms < day) return "hace " + Math.round(ms / 36e5) + " h";
+  if (ms < 7 * day) return "hace " + Math.round(ms / day) + " d";
+  return d.toLocaleDateString();
+}
+$("#linearRefresh").onclick = () => { linearLoaded = false; linearFetch(); };
 
 checkAuth();

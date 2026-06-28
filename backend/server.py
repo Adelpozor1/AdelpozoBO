@@ -30,7 +30,9 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -180,6 +182,42 @@ def save_linear_token(tok: str) -> None:
     finally:
         os.umask(old)
     os.chmod(LINEAR_TOKEN_PATH, 0o600)          # 600 aunque el archivo ya existiera
+
+
+LINEAR_API = "https://api.linear.app/graphql"
+
+
+class LinearError(Exception):
+    """Error legible para el front al hablar con Linear (sin filtrar el token)."""
+
+
+def linear_query(query: str, variables: dict | None = None, timeout: int = 20) -> dict:
+    """Lanza una consulta GraphQL a Linear con el token guardado (lin_api_…).
+    Devuelve el bloque `data`. Lanza LinearError con un mensaje legible si algo
+    falla. El token nunca se incluye en los mensajes de error."""
+    tok = read_linear_token()
+    if not tok:
+        raise LinearError("No hay token de Linear configurado (Perfil → Linear).")
+    body = json.dumps({"query": query, "variables": variables or {}}).encode()
+    req = urllib.request.Request(LINEAR_API, data=body, method="POST", headers={
+        "Authorization": tok,                  # API key personal: va tal cual
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            payload = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code in (400, 401, 403):
+            raise LinearError("Token de Linear inválido o sin permisos.")
+        raise LinearError(f"Linear respondió HTTP {e.code}.")
+    except urllib.error.URLError as e:
+        raise LinearError(f"No se pudo conectar con Linear: {e.reason}")
+    except (ValueError, TimeoutError) as e:
+        raise LinearError(f"Respuesta inesperada de Linear: {e}")
+    if payload.get("errors"):
+        msg = "; ".join(x.get("message", "?") for x in payload["errors"])[:300]
+        raise LinearError(msg or "Error de GraphQL en Linear.")
+    return payload.get("data", {})
 
 
 CFG = load_config()
@@ -761,7 +799,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self._send_security_headers()
-        for k, v in (extra_headers or {}):
+        items = extra_headers.items() if isinstance(extra_headers, dict) else (extra_headers or [])
+        for k, v in items:
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
@@ -779,7 +818,10 @@ class Handler(BaseHTTPRequestHandler):
             ".js": "text/javascript",
             ".css": "text/css",
         }.get(path.suffix, "application/octet-stream")
-        self._send(200, path.read_bytes(), ctype)
+        # Sin caché: el front cambia a menudo y queremos que el navegador
+        # (móvil incluido) sirva siempre la última versión tras un deploy.
+        self._send(200, path.read_bytes(), ctype,
+                   extra_headers={"Cache-Control": "no-cache, must-revalidate"})
 
     # -- GET --------------------------------------------------------------- #
     def do_GET(self):
@@ -816,6 +858,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._mon_hosts()
             else:
                 self._mon_report(q.get("host", [""])[0])
+        elif path == "/api/linear/issues":
+            if not self._is_authed():
+                return self._json(401, {"error": "no autorizado"})
+            self._linear_issues()
         else:
             self._send(404, b"not found", "text/plain")
 
@@ -944,6 +990,60 @@ class Handler(BaseHTTPRequestHandler):
         tok = str(self._read_body().get("token", "")).strip()
         save_linear_token(tok)
         self._json(200, {"ok": True, "set": bool(tok)})
+
+    # -- Linear (mi trabajo) ----------------------------------------------- #
+    def _linear_issues(self):
+        """Trae las incidencias asignadas a mí, sin las ya completadas/canceladas,
+        ordenadas por actualización. Devuelve también nombre/email del usuario."""
+        query = """
+        query Mias {
+          viewer {
+            name
+            email
+            assignedIssues(
+              first: 100
+              orderBy: updatedAt
+              filter: { state: { type: { nin: ["completed", "canceled"] } } }
+            ) {
+              nodes {
+                identifier
+                title
+                url
+                priority
+                priorityLabel
+                updatedAt
+                state { name type color }
+                team { key name }
+                project { name }
+              }
+            }
+          }
+        }
+        """
+        try:
+            data = linear_query(query)
+        except LinearError as e:
+            return self._json(200, {"ok": False, "error": str(e)})
+        viewer = data.get("viewer") or {}
+        nodes = ((viewer.get("assignedIssues") or {}).get("nodes")) or []
+        issues = []
+        for n in nodes:
+            st = n.get("state") or {}
+            issues.append({
+                "id": n.get("identifier", ""),
+                "title": n.get("title", ""),
+                "url": n.get("url", ""),
+                "priority": n.get("priority", 0),
+                "priorityLabel": n.get("priorityLabel", ""),
+                "updatedAt": n.get("updatedAt", ""),
+                "state": st.get("name", ""),
+                "stateType": st.get("type", ""),
+                "stateColor": st.get("color", ""),
+                "team": (n.get("team") or {}).get("key", ""),
+                "project": (n.get("project") or {}).get("name", ""),
+            })
+        self._json(200, {"ok": True, "user": viewer.get("name") or viewer.get("email") or "",
+                         "issues": issues})
 
     # -- monitorización (VPS remota por SSH) ------------------------------- #
     def _mon_hosts(self):

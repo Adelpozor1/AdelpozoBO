@@ -293,3 +293,28 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
   #main-row.convo-open #convo-panel { transform: translateX(0);
              box-shadow: 0 0 0 100vw rgba(0,0,0,.5); }
 }
+
+/* ---- Linear (mi trabajo) ---- */
+#linear-view { padding: 16px; overflow: auto; }
+#linearBody { max-width: 760px; margin: 0 auto; }
+.lin-group { margin: 0 0 22px; }
+.lin-group h3 { display: flex; align-items: center; gap: 8px; font-size: 14px;
+  color: var(--text); margin: 0 0 10px; text-transform: capitalize; }
+.lin-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.lin-count { font-size: 11px; color: var(--muted); border: 1px solid var(--border);
+  border-radius: 10px; padding: 0 7px; }
+.lin-card { display: block; text-decoration: none; color: inherit; background: var(--panel);
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 0 0 8px;
+  transition: border-color .15s; }
+.lin-card:hover { border-color: var(--accent); }
+.lin-row { display: flex; align-items: center; gap: 8px; }
+.lin-id { font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; }
+.lin-title { margin: 4px 0; font-size: 14px; }
+.lin-tag { font-size: 11px; color: var(--muted); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 6px; }
+.lin-when { margin-left: auto; font-size: 11px; color: var(--muted); }
+.lin-prio { margin-left: auto; font-size: 11px; padding: 1px 7px; border-radius: 4px;
+  border: 1px solid var(--border); color: var(--muted); }
+.lin-prio.p1 { color: #f85149; border-color: #f85149; }   /* Urgent */
+.lin-prio.p2 { color: #f0883e; border-color: #5a3a25; }   /* High */
+.lin-prio.p3 { color: #d29922; }                          /* Medium */

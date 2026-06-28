@@ -24,6 +24,7 @@
     <nav id="sections">
       <button id="tabDev" class="tab active">Desarrollo</button>
       <button id="tabMon" class="tab">Monitorización</button>
+      <button id="tabLinear" class="tab">Linear</button>
     </nav>
     <span class="meta" id="status">listo</span>
     <span class="spacer"></span>
@@ -123,6 +124,20 @@
           <div class="mc-body"></div>
         </section>
       </div>
+    </div>
+  </div>
+
+  <!-- Vista: Linear (mi trabajo) -->
+  <div id="linear-view" class="hidden">
+    <div class="mon-bar">
+      <b>Mi trabajo en Linear</b>
+      <span id="linearUser" class="badge"></span>
+      <button id="linearRefresh" title="Actualizar">↻ Actualizar</button>
+      <span id="linearMeta" class="meta"></span>
+    </div>
+    <div id="linearBody">
+      <div id="linearEmpty" class="placeholder hidden"></div>
+      <div id="linearGroups"></div>
     </div>
   </div>
 
