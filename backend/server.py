@@ -473,11 +473,21 @@ def ssh_run(host: dict, script: str, timeout: int = 30):
 # host se inyectan en base64 (__..._B64__) y se decodifican en la VPS.
 COLLECTOR_TMPL = r'''set +e
 export LC_ALL=C
-DBC="$(printf %s '__DBC_B64__' | base64 -d 2>/dev/null)"
+DBPAT="$(printf %s '__DBC_B64__' | base64 -d 2>/dev/null)"
+N8PAT="$(printf %s '__N8C_B64__' | base64 -d 2>/dev/null)"
 DBU="$(printf %s '__DBU_B64__' | base64 -d 2>/dev/null)"
 DBN="$(printf %s '__DBN_B64__' | base64 -d 2>/dev/null)"
 DBP="$(printf %s '__DBP_B64__' | base64 -d 2>/dev/null)"
 N8URL="$(printf %s '__N8URL_B64__' | base64 -d 2>/dev/null)"
+# Resuelve el nombre real del contenedor a partir de un prefijo de servicio
+# (Docker Swarm/EasyPanel les pone sufijos aleatorios: <servicio>.<n>.<taskid>).
+# Acepta también un nombre exacto. Vacío si no hay docker o no casa nada.
+resolve_container() {
+  [ -n "$1" ] && command -v docker >/dev/null || return 0
+  docker ps --format '{{.Names}}' | grep -E "^$1(\.|\$)" | head -1
+}
+DBC="$(resolve_container "$DBPAT")"
+N8C="$(resolve_container "$N8PAT")"
 psqlq() {
   if [ -n "$DBC" ]; then
     docker exec -e PGPASSWORD="$DBP" "$DBC" psql -U "$DBU" -d "$DBN" -tAF '|' -c "$1" 2>&1
@@ -498,7 +508,12 @@ echo "@@hostname";  hostname 2>&1
 echo "@@ps";        ps -eo pid,comm,pcpu,pmem --sort=-pcpu 2>/dev/null | head -8
 echo "@@docker_ps"; (command -v docker >/dev/null && docker ps -a --format '{{json .}}' 2>&1) || echo "sin-docker"
 echo "@@docker_stats"; (command -v docker >/dev/null && docker stats --no-stream --format '{{json .}}' 2>&1)
-echo "@@n8n_health"; if [ -n "$N8URL" ]; then curl -s -m 5 -o /dev/null -w '%{http_code}' "$N8URL/healthz" 2>&1 || echo "err"; fi
+echo "@@n8n_health"
+if [ -n "$N8C" ]; then
+  docker exec "$N8C" wget -q -S -O /dev/null http://localhost:5678/healthz 2>&1 | grep -oE 'HTTP/[0-9.]+ [0-9]+' | grep -oE '[0-9]+$' | head -1
+elif [ -n "$N8URL" ]; then
+  curl -s -m 5 -o /dev/null -w '%{http_code}' "$N8URL/healthz" 2>&1 || echo "err"
+fi
 echo "@@db_isready"; if [ -n "$DBC" ]; then docker exec "$DBC" pg_isready 2>&1; fi
 echo "@@db_size";    psqlq "SELECT pg_size_pretty(pg_database_size(current_database()))"
 echo "@@db_conns";   psqlq "SELECT count(*) FROM pg_stat_activity"
@@ -516,6 +531,7 @@ def build_collector(h: dict) -> str:
         return base64.b64encode(str(s or "").encode()).decode()
     return (COLLECTOR_TMPL
             .replace("__DBC_B64__", b64(h.get("db_container")))
+            .replace("__N8C_B64__", b64(h.get("n8n_container")))
             .replace("__DBU_B64__", b64(h.get("db_user") or "postgres"))
             .replace("__DBN_B64__", b64(h.get("db_name")))
             .replace("__DBP_B64__", b64(h.get("db_password")))
