@@ -44,29 +44,29 @@ qué se reutiliza. → **Cumplido.**
 *Claude deja de ser "consola sobre la VPS" y pasa a asistente del producto.*
 
 ### Decisiones tomadas
-- **Auth de Claude propia, NO el login de la VPS.** El asistente usa una **API
-  key de Anthropic** dedicada (credencial y facturación aisladas, separadas del
-  CLI `claude` logueado en la VPS). Se guarda en `panel.conf` (600, fuera de git).
-- **Llamada directa a la API** `POST https://api.anthropic.com/v1/messages` con
-  **stdlib pura** (`urllib`) — sin SDK, respeta la regla de cero dependencias.
-  Modelo: `claude-opus-4-8`. Headers: `x-api-key`, `anthropic-version: 2023-06-01`.
-- **Solo asistente**: modo chat puro, **sin herramientas y sin tocar la VPS**
-  (nada de `--dangerously-skip-permissions`). Streaming SSE para respuesta fluida.
-- **Linear**: empezar con **API key personal** (rápido, solo yo); dejar **OAuth**
-  ("conectar mi proyecto") para cuando entren terceros.
+- **Auth de Claude: se reutiliza el CLI `claude` ya logueado en la VPS.** Sin API
+  key dedicada → **cero gasto extra** (aprovecha la suscripción existente). Se
+  mantiene el puente al CLI que ya existe en `server.py`.
+- **Solo asistente**: modo ayuda/chat, **sin actuar sobre la VPS**. Acotar las
+  capacidades del agente (quitar `--dangerously-skip-permissions`, usar
+  `--permission-mode plan` o `--disallowed-tools` para que no ejecute/edite).
+- **Linear**: token personal en un archivo dedicado `backend/linear.token`
+  (vacío, permisos 600, en `.gitignore`, nunca devuelto al navegador ni a logs).
+  OAuth ("conectar tu proyecto") queda para más adelante.
 
 ### Tareas
-- [ ] Cliente de la API de Claude en stdlib (`urllib`, streaming SSE) leyendo la
-      API key de `panel.conf`.
-- [ ] Reconvertir la pestaña de chat en el **asistente de la plataforma** usando
-      ese cliente (en vez del puente al CLI `claude`).
-- [ ] **Integración con Linear** vía API key personal: traer incidencias y
-      proyectos; definir qué se muestra y qué acciones se permiten.
+- [ ] Reconvertir la pestaña de chat en el **asistente de la plataforma**
+      (reutiliza el puente al CLI `claude` que ya existe).
+- [ ] **Acotar el agente** a solo-ayuda: revisar el array `cmd` en `_chat`
+      (`server.py`) y quitar la autonomía total sobre la VPS.
+- [x] Dejar `backend/linear.token` seguro (600, gitignored) + `.example`.
+- [ ] **Integración con Linear** leyendo el token de `backend/linear.token`:
+      traer incidencias/proyectos; definir qué se muestra y qué acciones se permiten.
 - [ ] Decidir qué pasa con el **chat agéntico antiguo** sobre la VPS (se conserva
       como herramienta interna oculta, o se retira).
 
-**Hecho cuando:** puedo pedirle ayuda al asistente dentro del panel (con su API
-key propia) y consultar mi trabajo de Linear desde él.
+**Hecho cuando:** puedo pedirle ayuda al asistente dentro del panel (usando el
+`claude` de la VPS) y consultar mi trabajo de Linear desde él.
 
 ---
 

@@ -1,0 +1,13 @@
+# Plantilla — NO pongas el token aquí.
+#
+# Para configurar el token de Linear:
+#   1) Sácalo en Linear: Settings -> API -> Personal API keys -> New key
+#   2) Pégalo (solo el token, una línea, sin comillas) en el archivo real:
+#        backend/linear.token
+#      p.ej.:  printf '%s' 'lin_api_xxxxxxxx' > backend/linear.token
+#   3) Asegura permisos:  chmod 600 backend/linear.token
+#
+# Seguridad:
+#   - backend/linear.token está en .gitignore (nunca se sube a git).
+#   - Permisos 600: solo el usuario del panel puede leerlo.
+#   - El backend lo lee en memoria y NUNCA lo devuelve al navegador ni a logs.

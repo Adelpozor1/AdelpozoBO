@@ -76,11 +76,11 @@ Complementos de esa vista (más adelante): tecnologías usadas, esquema y
    *(Decidido: conexión por API key personal al inicio; OAuth más adelante.)*
 
 ### Decisiones cerradas
-- **Auth de Claude**: el asistente usa una **API key de Anthropic propia**
-  (no el login de la VPS), llamando a la API con **stdlib pura** (`urllib`),
-  modelo `claude-opus-4-8`. Ver [PLAN-DE-ACCION.md](./PLAN-DE-ACCION.md) Fase 1.
+- **Auth de Claude**: el asistente **reutiliza el `claude` ya logueado en la VPS**
+  (la suscripción existente) → cero gasto extra. Sin API key dedicada.
 - **Alcance del asistente**: solo ayuda/chat, **sin actuar sobre la VPS**.
-- **Linear**: API key personal primero; OAuth ("conectar tu proyecto") después.
+- **Linear**: token personal en `backend/linear.token` (600, gitignored, nunca
+  expuesto). OAuth ("conectar tu proyecto") más adelante.
 
 ## Estado
 

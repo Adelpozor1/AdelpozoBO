@@ -3,6 +3,7 @@ backend/panel.conf
 backend/panel.log
 backend/sessions.json
 backend/monitor.json
+backend/linear.token
 
 # Caches de Python
 __pycache__/
