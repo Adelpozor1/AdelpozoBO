@@ -758,10 +758,10 @@ $("#mhDelBtn").onclick = async () => {
   await monLoadHosts(); monRender(null); if (monSel) monFetch();
 };
 
-// ---- Linear (mi trabajo) -------------------------------------------------- //
-let linearLoaded = false;
+// ---- Linear (todas las issues) -------------------------------------------- //
+let linearLoaded = false, linIssues = [], linUser = "", linMine = false;
 // orden de los grupos por tipo de estado (lo "en curso" arriba)
-const LINEAR_ORDER = { started: 0, unstarted: 1, backlog: 2, triage: 3, "": 4 };
+const LINEAR_ORDER = { started: 0, unstarted: 1, backlog: 2, triage: 3, completed: 4, canceled: 5, "": 6 };
 
 async function linearEnter() {
   if (!linearLoaded) await linearFetch();
@@ -770,7 +770,7 @@ async function linearFetch() {
   const meta = $("#linearMeta"), empty = $("#linearEmpty"), groups = $("#linearGroups");
   meta.textContent = "cargando…"; empty.classList.add("hidden");
   let j;
-  try { j = await (await fetch("/api/linear/issues")).json(); }
+  try { j = await (await fetch("/api/linear/all")).json(); }
   catch (e) { meta.textContent = ""; empty.classList.remove("hidden"); empty.textContent = "Error de conexión."; return; }
   meta.textContent = "";
   if (!j.ok) {
@@ -781,36 +781,81 @@ async function linearFetch() {
     return;
   }
   linearLoaded = true;
-  $("#linearUser").textContent = j.user || "";
-  const issues = j.issues || [];
-  if (!issues.length) {
-    groups.innerHTML = ""; empty.classList.remove("hidden");
-    empty.textContent = "Sin incidencias asignadas pendientes. 🎉";
-    return;
-  }
+  linUser = j.user || "";
+  linIssues = j.issues || [];
+  $("#linearUser").textContent = linUser;
+  linPopulateFilters();
+  linRender();
+}
+// rellena los desplegables a partir de los datos (orden alfabético, con conteo)
+function linPopulateFilters() {
+  const fill = (sel, vals) => {
+    const cur = sel.value, first = sel.options[0];
+    sel.innerHTML = ""; sel.appendChild(first);
+    for (const [v, n] of vals) { const o = document.createElement("option"); o.value = v; o.textContent = `${v} (${n})`; sel.appendChild(o); }
+    sel.value = [...sel.options].some(o => o.value === cur) ? cur : "";
+  };
+  const count = key => {
+    const m = new Map();
+    for (const it of linIssues) { const v = it[key] || (key === "project" ? "(sin proyecto)" : key === "assignee" ? "(sin asignar)" : ""); if (v) m.set(v, (m.get(v) || 0) + 1); }
+    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  };
+  fill($("#linProject"), count("project"));
+  fill($("#linState"), count("state"));
+  fill($("#linAssignee"), count("assignee"));
+}
+function linRender() {
+  const groups = $("#linearGroups"), empty = $("#linearEmpty");
+  const q = $("#linQ").value.trim().toLowerCase();
+  const fp = $("#linProject").value, fs = $("#linState").value, fa = $("#linAssignee").value;
+  const groupBy = $("#linGroup").value;
+  let items = linIssues.filter(it => {
+    if (linMine && !it.mine) return false;
+    if (fp && (it.project || "(sin proyecto)") !== fp) return false;
+    if (fs && it.state !== fs) return false;
+    if (fa && (it.assignee || "(sin asignar)") !== fa) return false;
+    if (q && !(it.id.toLowerCase().includes(q) || it.title.toLowerCase().includes(q))) return false;
+    return true;
+  });
+  $("#linearMeta").textContent = `${items.length} de ${linIssues.length}`;
+  if (!items.length) { groups.innerHTML = ""; empty.classList.remove("hidden"); empty.textContent = "Sin issues para este filtro."; return; }
   empty.classList.add("hidden");
-  // agrupa por estado
-  const byState = {};
-  for (const it of issues) (byState[it.state] = byState[it.state] || { type: it.stateType, color: it.stateColor, items: [] }).items.push(it);
-  const order = Object.entries(byState).sort((a, b) =>
-    (LINEAR_ORDER[a[1].type] ?? 9) - (LINEAR_ORDER[b[1].type] ?? 9) || a[0].localeCompare(b[0]));
+  // agrupa
+  const buckets = new Map();
+  const keyOf = it => groupBy === "project" ? (it.project || "(sin proyecto)")
+    : groupBy === "state" ? it.state
+    : groupBy === "assignee" ? (it.assignee || "(sin asignar)") : "";
+  for (const it of items) { const k = keyOf(it); if (!buckets.has(k)) buckets.set(k, []); buckets.get(k).push(it); }
+  let order = [...buckets.entries()];
+  if (groupBy === "state") order.sort((a, b) => (LINEAR_ORDER[a[1][0].stateType] ?? 9) - (LINEAR_ORDER[b[1][0].stateType] ?? 9) || a[0].localeCompare(b[0]));
+  else if (groupBy) order.sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
   let h = "";
-  for (const [state, g] of order) {
-    h += `<section class="lin-group"><h3><span class="lin-dot" style="background:${esc(g.color || "#888")}"></span>${esc(state)} <span class="lin-count">${g.items.length}</span></h3>`;
-    for (const it of g.items) {
-      const prio = it.priority && it.priority > 0 ? `<span class="lin-prio p${it.priority}">${esc(it.priorityLabel || "")}</span>` : "";
-      const proj = it.project ? `<span class="lin-tag">${esc(it.project)}</span>` : "";
-      h += `<a class="lin-card" href="${esc(it.url)}" target="_blank" rel="noopener">
-        <div class="lin-row"><span class="lin-id">${esc(it.team)}·${esc(it.id)}</span>${prio}</div>
-        <div class="lin-title">${esc(it.title)}</div>
-        <div class="lin-row">${proj}<span class="lin-when">${esc(when(it.updatedAt))}</span></div>
-      </a>`;
-    }
+  for (const [name, arr] of order) {
+    arr.sort((a, b) => (LINEAR_ORDER[a.stateType] ?? 9) - (LINEAR_ORDER[b.stateType] ?? 9) || (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+    if (groupBy) {
+      const dot = groupBy === "state" ? `<span class="lin-dot" style="background:${esc(arr[0].stateColor || "#888")}"></span>` : "";
+      h += `<section class="lin-group"><h3>${dot}${esc(name)} <span class="lin-count">${arr.length}</span></h3>`;
+    } else h += `<section class="lin-group">`;
+    for (const it of arr) h += linCard(it, groupBy);
     h += "</section>";
   }
   groups.innerHTML = h;
-  meta.textContent = issues.length + " incidencia(s)";
 }
+function linCard(it, groupBy) {
+  const prio = it.priority && it.priority > 0 ? `<span class="lin-prio p${it.priority}">${esc(it.priorityLabel || "")}</span>` : "";
+  const tags = [];
+  if (groupBy !== "state") tags.push(`<span class="lin-tag" style="border-color:${esc(it.stateColor || "var(--border)")}">${esc(it.state)}</span>`);
+  if (groupBy !== "project" && it.project) tags.push(`<span class="lin-tag">${esc(it.project)}</span>`);
+  if (groupBy !== "assignee") tags.push(`<span class="lin-tag${it.mine ? " mine" : ""}">${esc(it.assignee || "sin asignar")}</span>`);
+  return `<a class="lin-card" href="${esc(it.url)}" target="_blank" rel="noopener">
+    <div class="lin-row"><span class="lin-id">${esc(it.team)}·${esc(it.id)}</span>${prio}</div>
+    <div class="lin-title">${esc(it.title)}</div>
+    <div class="lin-row lin-tags">${tags.join("")}<span class="lin-when">${esc(when(it.updatedAt))}</span></div>
+  </a>`;
+}
+["#linProject", "#linState", "#linAssignee", "#linGroup"].forEach(id => $(id).onchange = linRender);
+$("#linQ").oninput = linRender;
+$("#linMineBtn").onclick = () => { linMine = !linMine; $("#linMineBtn").classList.toggle("active", linMine); linRender(); };
 function when(iso) {
   if (!iso) return "";
   const d = new Date(iso), now = new Date(), ms = now - d, day = 864e5;

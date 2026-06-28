@@ -858,10 +858,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._mon_hosts()
             else:
                 self._mon_report(q.get("host", [""])[0])
-        elif path == "/api/linear/issues":
+        elif path in ("/api/linear/issues", "/api/linear/all"):
             if not self._is_authed():
                 return self._json(401, {"error": "no autorizado"})
-            self._linear_issues()
+            self._linear_issues() if path == "/api/linear/issues" else self._linear_all()
         else:
             self._send(404, b"not found", "text/plain")
 
@@ -991,7 +991,32 @@ class Handler(BaseHTTPRequestHandler):
         save_linear_token(tok)
         self._json(200, {"ok": True, "set": bool(tok)})
 
-    # -- Linear (mi trabajo) ----------------------------------------------- #
+    # -- Linear ------------------------------------------------------------ #
+    @staticmethod
+    def _li_map(n: dict, viewer_id: str = "") -> dict:
+        """Normaliza un nodo issue de Linear al shape que consume el front."""
+        st = n.get("state") or {}
+        asg = n.get("assignee") or {}
+        labels = [{"name": l.get("name", ""), "color": l.get("color", "")}
+                  for l in ((n.get("labels") or {}).get("nodes") or [])]
+        return {
+            "id": n.get("identifier", ""),
+            "title": n.get("title", ""),
+            "url": n.get("url", ""),
+            "priority": n.get("priority", 0),
+            "priorityLabel": n.get("priorityLabel", ""),
+            "updatedAt": n.get("updatedAt", ""),
+            "createdAt": n.get("createdAt", ""),
+            "state": st.get("name", ""),
+            "stateType": st.get("type", ""),
+            "stateColor": st.get("color", ""),
+            "team": (n.get("team") or {}).get("key", ""),
+            "project": (n.get("project") or {}).get("name", ""),
+            "assignee": asg.get("displayName") or asg.get("name") or "",
+            "mine": bool(viewer_id) and asg.get("id") == viewer_id,
+            "labels": labels,
+        }
+
     def _linear_issues(self):
         """Trae las incidencias asignadas a mí, sin las ya completadas/canceladas,
         ordenadas por actualización. Devuelve también nombre/email del usuario."""
@@ -1006,15 +1031,12 @@ class Handler(BaseHTTPRequestHandler):
               filter: { state: { type: { nin: ["completed", "canceled"] } } }
             ) {
               nodes {
-                identifier
-                title
-                url
-                priority
-                priorityLabel
-                updatedAt
+                identifier title url priority priorityLabel updatedAt createdAt
                 state { name type color }
+                assignee { id name displayName }
                 team { key name }
                 project { name }
+                labels { nodes { name color } }
               }
             }
           }
@@ -1026,22 +1048,43 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": False, "error": str(e)})
         viewer = data.get("viewer") or {}
         nodes = ((viewer.get("assignedIssues") or {}).get("nodes")) or []
-        issues = []
-        for n in nodes:
-            st = n.get("state") or {}
-            issues.append({
-                "id": n.get("identifier", ""),
-                "title": n.get("title", ""),
-                "url": n.get("url", ""),
-                "priority": n.get("priority", 0),
-                "priorityLabel": n.get("priorityLabel", ""),
-                "updatedAt": n.get("updatedAt", ""),
-                "state": st.get("name", ""),
-                "stateType": st.get("type", ""),
-                "stateColor": st.get("color", ""),
-                "team": (n.get("team") or {}).get("key", ""),
-                "project": (n.get("project") or {}).get("name", ""),
-            })
+        issues = [self._li_map(n) for n in nodes]
+        self._json(200, {"ok": True, "user": viewer.get("name") or viewer.get("email") or "",
+                         "issues": issues})
+
+    def _linear_all(self):
+        """Trae TODAS las incidencias del workspace (paginando), con su proyecto,
+        estado, asignado, prioridad y etiquetas. Marca `mine` si son del usuario."""
+        query = """
+        query Todas($after: String) {
+          viewer { id name email }
+          issues(first: 250, after: $after, orderBy: updatedAt) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              identifier title url priority priorityLabel updatedAt createdAt
+              state { name type color }
+              assignee { id name displayName }
+              team { key name }
+              project { name }
+              labels { nodes { name color } }
+            }
+          }
+        }
+        """
+        issues, after, viewer = [], None, {}
+        try:
+            for _ in range(12):                    # tope de seguridad: 12 páginas (~3000 issues)
+                data = linear_query(query, {"after": after}, timeout=30)
+                viewer = data.get("viewer") or viewer
+                blk = data.get("issues") or {}
+                vid = viewer.get("id", "")
+                issues.extend(self._li_map(n, vid) for n in (blk.get("nodes") or []))
+                pi = blk.get("pageInfo") or {}
+                if not pi.get("hasNextPage"):
+                    break
+                after = pi.get("endCursor")
+        except LinearError as e:
+            return self._json(200, {"ok": False, "error": str(e)})
         self._json(200, {"ok": True, "user": viewer.get("name") or viewer.get("email") or "",
                          "issues": issues})
 

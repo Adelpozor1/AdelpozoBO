@@ -127,12 +127,22 @@
     </div>
   </div>
 
-  <!-- Vista: Linear (mi trabajo) -->
+  <!-- Vista: Linear (todas las issues) -->
   <div id="linear-view" class="hidden">
-    <div class="mon-bar">
-      <b>Mi trabajo en Linear</b>
+    <div class="lin-bar">
+      <input id="linQ" type="search" placeholder="Buscar (id o título)…" class="lin-search">
+      <select id="linProject" title="Proyecto"><option value="">Todos los proyectos</option></select>
+      <select id="linState" title="Estado"><option value="">Todos los estados</option></select>
+      <select id="linAssignee" title="Asignado"><option value="">Cualquier asignado</option></select>
+      <select id="linGroup" title="Agrupar por">
+        <option value="project">Agrupar: Proyecto</option>
+        <option value="state">Agrupar: Estado</option>
+        <option value="assignee">Agrupar: Asignado</option>
+        <option value="">Sin agrupar</option>
+      </select>
+      <button id="linMineBtn" class="ghost" title="Solo mis issues">Solo mías</button>
+      <button id="linearRefresh" title="Actualizar">↻</button>
       <span id="linearUser" class="badge"></span>
-      <button id="linearRefresh" title="Actualizar">↻ Actualizar</button>
       <span id="linearMeta" class="meta"></span>
     </div>
     <div id="linearBody">

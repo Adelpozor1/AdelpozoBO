@@ -294,9 +294,21 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
              box-shadow: 0 0 0 100vw rgba(0,0,0,.5); }
 }
 
-/* ---- Linear (mi trabajo) ---- */
-#linear-view { padding: 16px; overflow: auto; }
-#linearBody { max-width: 760px; margin: 0 auto; }
+/* ---- Linear (todas las issues) ---- */
+#linear-view { display: flex; flex-direction: column; overflow: hidden; }
+.lin-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.lin-bar select, .lin-search { background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+.lin-search { min-width: 200px; flex: 1 1 200px; }
+.lin-bar button { background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
+.lin-bar button:hover { border-color: var(--accent); }
+#linMineBtn.active { background: var(--accent); color: #1a1109; border-color: var(--accent); }
+#linearBody { overflow: auto; padding: 16px; }
+.lin-tags { flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.lin-tag.mine { color: var(--accent); border-color: var(--accent); }
+#linear-view #linearBody { max-width: 820px; margin: 0 auto; width: 100%; }
 .lin-group { margin: 0 0 22px; }
 .lin-group h3 { display: flex; align-items: center; gap: 8px; font-size: 14px;
   color: var(--text); margin: 0 0 10px; text-transform: capitalize; }
