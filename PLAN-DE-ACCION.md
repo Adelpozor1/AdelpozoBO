@@ -14,19 +14,29 @@ alertas configurables**.
 
 ---
 
-## Fase 0 — Base y reorganización
+## Fase 0 — Base y reorganización  ✅ (cerrada)
 *Dejar el terreno limpio antes de construir.*
 
-- [ ] Revisar y cerrar el cambio pendiente en `backend/server.py` (mejora del
+- [x] Revisar y cerrar el cambio pendiente en `backend/server.py` (mejora del
       collector de monitorización: resolución de contenedores por prefijo +
-      healthcheck n8n por `docker exec`). Probar y commitear.
-- [ ] Consolidar documentación: CONTEXTO + CLAUDE + este plan como referencia.
-- [ ] Decidir el destino del chat agéntico actual (entra en Fase 1).
-- [ ] Inventario de lo reutilizable: módulo de monitor, modelo de "proyectos",
-      auth/2FA, estructura del frontend.
+      healthcheck n8n por `docker exec`). Probado (servicio reiniciado OK) y
+      commiteado (`b638559`).
+- [x] Consolidar documentación: CONTEXTO + CLAUDE + este plan (`7b516b6`).
+- [→] Decidir el destino del chat agéntico actual → se trata en **Fase 1**.
+- [x] Inventario de lo reutilizable (abajo).
+
+### Inventario de lo reutilizable (foto actual de `server.py` + frontend)
+
+| Pieza | Dónde | Se reutiliza en |
+|-------|-------|-----------------|
+| **Monitor**: `ssh_run`, `COLLECTOR_TMPL`, `build_collector`, parseo (`_n8n`, etc.) | backend | Fase 2 (alertas) y Fase 3 (monitor por proyecto) |
+| **Modelo "proyectos"**: clone/pull/checkout/delete, sesión y lock por proyecto | backend + `app.js` | Fase 3 (proyectos por túnel) y Fase 4 (vista por proyecto) |
+| **Auth + 2FA + sesiones** (scrypt, TOTP, cookie segura, bloqueo) | backend | Base transversal de toda la plataforma |
+| **Puente a `claude`** (chat streaming NDJSON) | backend + `app.js` | Fase 1 (agente de ayuda) |
+| **Frontend**: pestañas, modal de host, render de tarjetas | `index.html`/`app.js`/`styles.css` | Fase 2 y Fase 4 (UI visual) |
 
 **Hecho cuando:** repo sin cambios sueltos, docs alineadas, y una foto clara de
-qué se reutiliza.
+qué se reutiliza. → **Cumplido.**
 
 ---
 
