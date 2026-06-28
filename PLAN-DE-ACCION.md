@@ -43,15 +43,30 @@ qué se reutiliza. → **Cumplido.**
 ## Fase 1 — Claude como agente de ayuda de la plataforma
 *Claude deja de ser "consola sobre la VPS" y pasa a asistente del producto.*
 
-- [ ] Definir el **rol y alcance** del agente (qué puede hacer, qué no).
-- [ ] Reconvertir la pestaña de chat en el **asistente de la plataforma**.
-- [ ] **Integración con Linear** (vía agente / API): traer incidencias y
-      proyectos; definir qué se muestra y qué acciones se permiten.
-- [ ] Acotar permisos del agente si procede (revisar
-      `--dangerously-skip-permissions`).
+### Decisiones tomadas
+- **Auth de Claude propia, NO el login de la VPS.** El asistente usa una **API
+  key de Anthropic** dedicada (credencial y facturación aisladas, separadas del
+  CLI `claude` logueado en la VPS). Se guarda en `panel.conf` (600, fuera de git).
+- **Llamada directa a la API** `POST https://api.anthropic.com/v1/messages` con
+  **stdlib pura** (`urllib`) — sin SDK, respeta la regla de cero dependencias.
+  Modelo: `claude-opus-4-8`. Headers: `x-api-key`, `anthropic-version: 2023-06-01`.
+- **Solo asistente**: modo chat puro, **sin herramientas y sin tocar la VPS**
+  (nada de `--dangerously-skip-permissions`). Streaming SSE para respuesta fluida.
+- **Linear**: empezar con **API key personal** (rápido, solo yo); dejar **OAuth**
+  ("conectar mi proyecto") para cuando entren terceros.
 
-**Hecho cuando:** puedo pedirle ayuda al agente dentro del panel y consultar mi
-trabajo de Linear desde él.
+### Tareas
+- [ ] Cliente de la API de Claude en stdlib (`urllib`, streaming SSE) leyendo la
+      API key de `panel.conf`.
+- [ ] Reconvertir la pestaña de chat en el **asistente de la plataforma** usando
+      ese cliente (en vez del puente al CLI `claude`).
+- [ ] **Integración con Linear** vía API key personal: traer incidencias y
+      proyectos; definir qué se muestra y qué acciones se permiten.
+- [ ] Decidir qué pasa con el **chat agéntico antiguo** sobre la VPS (se conserva
+      como herramienta interna oculta, o se retira).
+
+**Hecho cuando:** puedo pedirle ayuda al asistente dentro del panel (con su API
+key propia) y consultar mi trabajo de Linear desde él.
 
 ---
 

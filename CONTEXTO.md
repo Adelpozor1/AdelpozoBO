@@ -73,8 +73,14 @@ Complementos de esa vista (más adelante): tecnologías usadas, esquema y
 5. **Audiencia**: ¿quién verá esto? ¿clientes con acceso, o solo tú lo enseñas?
    ¿Hace falta una vista pública/compartible?
 6. **Linear**: ¿qué quieres ver/hacer con Linear desde el agente/panel?
-7. **Chat actual**: el chat agéntico se reconvierte en el **agente de ayuda**
-   (pilar 1). ¿Mantiene capacidad de actuar sobre la VPS o se acota a asistir?
+   *(Decidido: conexión por API key personal al inicio; OAuth más adelante.)*
+
+### Decisiones cerradas
+- **Auth de Claude**: el asistente usa una **API key de Anthropic propia**
+  (no el login de la VPS), llamando a la API con **stdlib pura** (`urllib`),
+  modelo `claude-opus-4-8`. Ver [PLAN-DE-ACCION.md](./PLAN-DE-ACCION.md) Fase 1.
+- **Alcance del asistente**: solo ayuda/chat, **sin actuar sobre la VPS**.
+- **Linear**: API key personal primero; OAuth ("conectar tu proyecto") después.
 
 ## Estado
 
