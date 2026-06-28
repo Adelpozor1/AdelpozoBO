@@ -60,6 +60,9 @@ qué se reutiliza. → **Cumplido.**
 - [ ] **Acotar el agente** a solo-ayuda: revisar el array `cmd` en `_chat`
       (`server.py`) y quitar la autonomía total sobre la VPS.
 - [x] Dejar `backend/linear.token` seguro (600, gitignored) + `.example`.
+- [x] **Guardar el token de Linear desde el panel web** (perfil → sección Linear):
+      `POST /api/account/linear-token` lo escribe en `backend/linear.token` (600);
+      `whoami` expone solo `linear_token_set` (booleano), nunca el token.
 - [ ] **Integración con Linear** leyendo el token de `backend/linear.token`:
       traer incidencias/proyectos; definir qué se muestra y qué acciones se permiten.
 - [ ] Decidir qué pasa con el **chat agéntico antiguo** sobre la VPS (se conserva

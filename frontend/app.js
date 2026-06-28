@@ -465,9 +465,13 @@ $("#profileBtn").onclick = async () => {
   $("#totpMsg").textContent = ""; $("#totpMsg").style.color = "";
   $("#totpPw").value = ""; $("#totpResult").classList.add("hidden"); $("#qrBox").innerHTML = "";
   $("#ghToken").value = ""; $("#ghMsg").textContent = ""; $("#ghMsg").style.color = ""; $("#ghStatus").textContent = "…";
+  $("#linearToken").value = ""; $("#linearMsg").textContent = ""; $("#linearMsg").style.color = ""; $("#linearStatus").textContent = "…";
   $("#profile").classList.remove("hidden"); $("#curPw").focus();
-  try { const j = await (await fetch("/api/whoami")).json(); $("#ghStatus").textContent = j.github_token_set ? "✓ token configurado" : "sin token configurado"; }
-  catch (_) { $("#ghStatus").textContent = ""; }
+  try {
+    const j = await (await fetch("/api/whoami")).json();
+    $("#ghStatus").textContent = j.github_token_set ? "✓ token configurado" : "sin token configurado";
+    $("#linearStatus").textContent = j.linear_token_set ? "✓ token configurado" : "sin token configurado";
+  } catch (_) { $("#ghStatus").textContent = ""; $("#linearStatus").textContent = ""; }
 };
 $("#cancelPwBtn").onclick = () => $("#profile").classList.add("hidden");
 async function savePassword() {
@@ -506,6 +510,15 @@ async function saveGithubToken() {
   else { let e = "No se pudo guardar"; try { const j = await r.json(); if (j.error) e = j.error; } catch (_) {} msg.textContent = e; }
 }
 $("#saveGhBtn").onclick = saveGithubToken;
+async function saveLinearToken() {
+  const msg = $("#linearMsg"); msg.style.color = ""; const token = $("#linearToken").value.trim();
+  let r;
+  try { r = await fetch("/api/account/linear-token", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token}) }); }
+  catch (e) { msg.textContent = "Error de conexión"; return; }
+  if (r.ok) { const j = await r.json(); msg.style.color = "#3fb950"; msg.textContent = token ? "✓ Token guardado" : "✓ Token eliminado"; $("#linearToken").value = ""; $("#linearStatus").textContent = j.set ? "✓ token configurado" : "sin token configurado"; }
+  else { let e = "No se pudo guardar"; try { const j = await r.json(); if (j.error) e = j.error; } catch (_) {} msg.textContent = e; }
+}
+$("#saveLinearBtn").onclick = saveLinearToken;
 
 // --------------------------------------------------------------------------- //
 // Logout

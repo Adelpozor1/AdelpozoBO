@@ -37,6 +37,7 @@ from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
 CONF_PATH = BASE / "panel.conf"
+LINEAR_TOKEN_PATH = BASE / "linear.token"   # token de Linear (600, fuera de git)
 # El frontend vive en un repo/carpeta aparte; por defecto el hermano ../frontend.
 # Se puede cambiar con "staticdir" en panel.conf (mismo origen → la cookie sigue
 # funcionando, sin CORS).
@@ -160,6 +161,25 @@ def save_config(cfg: dict) -> None:
     """Reescribe panel.conf (permisos 600). Usado por --set-password/--reset-totp."""
     CONF_PATH.write_text(json.dumps(cfg, indent=2))
     os.chmod(CONF_PATH, 0o600)
+
+
+def read_linear_token() -> str:
+    """Lee el token de Linear del archivo dedicado. '' si no existe/está vacío."""
+    try:
+        return LINEAR_TOKEN_PATH.read_text().strip()
+    except FileNotFoundError:
+        return ""
+
+
+def save_linear_token(tok: str) -> None:
+    """Escribe (o vacía) backend/linear.token con permisos 600. El secreto vive
+    solo en este archivo: nunca en panel.conf, ni en git, ni se devuelve al front."""
+    old = os.umask(0o077)                       # crea con permisos restrictivos
+    try:
+        LINEAR_TOKEN_PATH.write_text(tok or "")
+    finally:
+        os.umask(old)
+    os.chmod(LINEAR_TOKEN_PATH, 0o600)          # 600 aunque el archivo ya existiera
 
 
 CFG = load_config()
@@ -773,6 +793,7 @@ class Handler(BaseHTTPRequestHandler):
             resp = {"authed": authed, "totp": bool(CFG.get("totp_enabled"))}
             if authed:
                 resp["github_token_set"] = bool(CFG.get("github_token"))
+                resp["linear_token_set"] = bool(read_linear_token())
             self._json(200, resp)
         elif path in ("/api/clients", "/api/projects", "/api/repos", "/api/repos/branches"):
             if not self._is_authed():
@@ -814,6 +835,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._reset_totp_web()
         if self.path == "/api/account/github-token":
             return self._set_github_token()
+        if self.path == "/api/account/linear-token":
+            return self._set_linear_token()
         routes = {
             "/api/clients/create": self._client_create,
             "/api/clients/delete": self._client_delete,
@@ -913,6 +936,13 @@ class Handler(BaseHTTPRequestHandler):
         tok = str(self._read_body().get("token", "")).strip()
         CFG["github_token"] = tok
         save_config(CFG)
+        self._json(200, {"ok": True, "set": bool(tok)})
+
+    def _set_linear_token(self):
+        """Guarda (o borra) el token de Linear en backend/linear.token (600).
+        Efecto inmediato, sin reinicio. Nunca devuelve el token al navegador."""
+        tok = str(self._read_body().get("token", "")).strip()
+        save_linear_token(tok)
         self._json(200, {"ok": True, "set": bool(tok)})
 
     # -- monitorización (VPS remota por SSH) ------------------------------- #
