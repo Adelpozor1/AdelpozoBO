@@ -63,8 +63,12 @@ qué se reutiliza. → **Cumplido.**
 - [x] **Guardar el token de Linear desde el panel web** (perfil → sección Linear):
       `POST /api/account/linear-token` lo escribe en `backend/linear.token` (600);
       `whoami` expone solo `linear_token_set` (booleano), nunca el token.
-- [ ] **Integración con Linear** leyendo el token de `backend/linear.token`:
-      traer incidencias/proyectos; definir qué se muestra y qué acciones se permiten.
+- [x] **Integración con Linear** leyendo el token de `backend/linear.token`:
+      pestaña **Linear** que trae *mi trabajo* (incidencias asignadas no
+      completadas) vía `GET /api/linear/issues` (GraphQL, stdlib `urllib`),
+      agrupadas por estado con prioridad y enlace a Linear. *Pendiente: que el
+      usuario guarde su token en Perfil → Linear para verlo en vivo; acciones de
+      escritura (crear/cerrar) quedan para una iteración posterior.*
 - [ ] Decidir qué pasa con el **chat agéntico antiguo** sobre la VPS (se conserva
       como herramienta interna oculta, o se retira).
 
