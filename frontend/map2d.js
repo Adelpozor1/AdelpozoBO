@@ -4,6 +4,7 @@
 // Estado
 let mapData = null;
 let healthCache = new Map();
+let vpsDetailCache = new Map();  // vpsId → response de /api/services/detail (con docker.containers)
 let pollTimer = null;
 let expandedVpsIds = new Set();
 
@@ -37,9 +38,35 @@ async function loadAndRender() {
     await fetchActiveAlerts();
     if (viewMode === "detail" && detailVpsId) renderVpsDetailView();
     else renderGrid();
+    // Pre-carga de docker.containers en background (no bloquea el primer render).
+    // El siguiente render (grid o detail) ya verá los nodos por contenedor.
+    fetchAllVpsDetails();
   } catch (e) {
     console.error("loadAndRender:", e);
   }
+}
+
+async function fetchAllVpsDetails() {
+  if (!mapData) return;
+  const tasks = [];
+  for (const cli of mapData.clients || []) {
+    for (const proj of cli.projects || []) {
+      const services = (proj.meta && proj.meta.services) || [];
+      for (const s of services) {
+        if (s.kind !== "vps") continue;
+        tasks.push(
+          fetch(`/api/services/detail?client=${encodeURIComponent(cli.name)}&project=${encodeURIComponent(proj.name)}&service=${encodeURIComponent(s.id)}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { if (data) vpsDetailCache.set(s.id, data); })
+            .catch(() => {})
+        );
+      }
+    }
+  }
+  await Promise.all(tasks);
+  // Re-render para reflejar los containers ya cargados
+  if (viewMode === "detail" && detailVpsId) renderVpsDetailView();
+  else renderGrid();
 }
 
 async function fetchAllHealth() {
@@ -188,46 +215,143 @@ function renderVpsCard(item) {
   </article>`;
 }
 
-// Mini-mapa SVG: VPS centro + carreteras radiales a servicios. Sin cambios respecto a F7.
-function renderMiniCityMap(vps, hosted, satellites, status) {
-  const W = 240, H = 180, cx = W / 2, cy = H / 2;
-  const roadColor = status === "ok" ? "#22c55e" : status === "warn" ? "#f59e0b" : "#ef4444";
-  let svg = `<svg class="vps-mini-map" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
-  const N = hosted.length;
-  const radius = 62;
-  const buildings = [];
+// Construye la lista unificada de nodos (containers running + declared sin container).
+// Se usa tanto en la mini-map preview (vista Mapa) como en la topología grande del detalle.
+function buildTopologyNodes(vps, hostedServices) {
+  const detail = vpsDetailCache.get(vps.id);
+  const docker = detail && detail.data && detail.data.docker;
+  const declaredByName = new Map();
+  for (const s of hostedServices) {
+    if (s.config && s.config.container) declaredByName.set(s.config.container, s);
+  }
+  const matchedDeclared = new Set();
+  const nodes = [];
+  if (docker && docker.available !== false) {
+    const running = (docker.containers || []).filter(c => (c.state || "").toLowerCase() === "running");
+    for (const c of running) {
+      const meta = classifyContainer(c.name);
+      let declared = declaredByName.get(c.name) || null;
+      if (!declared) {
+        for (const [n, svc] of declaredByName) {
+          if (c.name === n || c.name.startsWith(n + ".")) { declared = svc; break; }
+        }
+      }
+      if (declared) matchedDeclared.add(declared.id);
+      const groupDef = CONTAINER_ROLE_GROUPS.find(g => g.key === meta.role)
+                    || CONTAINER_ROLE_GROUPS[CONTAINER_ROLE_GROUPS.length - 1];
+      nodes.push({ container: c, meta, declared, color: groupDef.color, groupKey: meta.role });
+    }
+  }
+  for (const s of hostedServices) {
+    if (matchedDeclared.has(s.id)) continue;
+    const declaredContainer = (s.config && s.config.container) || s.name;
+    const meta = classifyContainer(declaredContainer);
+    const role = _serviceKindToRoleGroup(s.kind, declaredContainer);
+    const groupDef = CONTAINER_ROLE_GROUPS.find(g => g.key === role)
+                  || CONTAINER_ROLE_GROUPS[CONTAINER_ROLE_GROUPS.length - 1];
+    nodes.push({ container: null, meta: { ...meta, role }, declared: s, color: groupDef.color, groupKey: role });
+  }
+  // Ordena por rol (orden de CONTAINER_ROLE_GROUPS) y luego por env (testing → staging → global)
+  const roleIndex = r => {
+    const i = CONTAINER_ROLE_GROUPS.findIndex(g => g.key === r);
+    return i === -1 ? 999 : i;
+  };
+  const envOrder = { testing: 0, staging: 1, global: 2 };
+  nodes.sort((a, b) => {
+    const ra = roleIndex(a.meta.role), rb = roleIndex(b.meta.role);
+    if (ra !== rb) return ra - rb;
+    const ea = envOrder[a.meta.env] ?? 99, eb = envOrder[b.meta.env] ?? 99;
+    if (ea !== eb) return ea - eb;
+    return (a.meta.label || "").localeCompare(b.meta.label || "");
+  });
+  return nodes;
+}
+
+// Topología SVG. Si opts.preview, formato pequeño (sin labels, sin click).
+// Si !preview, formato grande con labels, click por nodo, etc.
+function renderTopologySVG(nodes, vpsService, vpsMetricsLine, vpsStatus, opts = {}) {
+  const isPreview = !!opts.preview;
+  const W = isPreview ? 260 : 960;
+  const H = isPreview ? 200 : 560;
+  const cx = W / 2, cy = H / 2;
+  const roadColor = vpsStatus === "ok" ? "#22c55e" : vpsStatus === "warn" ? "#f59e0b" : "#ef4444";
+  const cls = isPreview ? "vps-mini-map" : "detail-topology";
+
+  const N = nodes.length;
+  // Radio: deja margen suficiente para el tamaño de los nodos
+  const nodeHalf = isPreview ? 8 : 56;     // semi-ancho aprox
+  const radius = Math.min(W, H) / 2 - nodeHalf - (isPreview ? 8 : 24);
+
+  let svg = `<svg class="${cls}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
+
+  // Posiciones
+  const positions = [];
   for (let i = 0; i < N; i++) {
-    const angle = (2 * Math.PI * i) / N - Math.PI / 2;
-    const bx = cx + radius * Math.cos(angle);
-    const by = cy + radius * Math.sin(angle);
-    buildings.push({ svc: hosted[i], x: bx, y: by });
-    svg += `<line x1="${cx}" y1="${cy}" x2="${bx}" y2="${by}" stroke="${roadColor}" stroke-width="3" stroke-linecap="round" opacity="0.85" />`;
-    svg += `<line x1="${cx}" y1="${cy}" x2="${bx}" y2="${by}" stroke="#ffffff" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.6" />`;
+    const ang = (2 * Math.PI * i) / Math.max(N, 1) - Math.PI / 2;
+    positions.push({ x: cx + radius * Math.cos(ang), y: cy + radius * Math.sin(ang) });
   }
-  const satRadius = 96;
-  for (let i = 0; i < satellites.length; i++) {
-    const angle = (2 * Math.PI * i) / Math.max(satellites.length, 3) + Math.PI / 4;
-    const sx = cx + satRadius * Math.cos(angle);
-    const sy = cy + satRadius * Math.sin(angle);
-    const cx2 = Math.max(10, Math.min(W - 10, sx));
-    const cy2 = Math.max(10, Math.min(H - 10, sy));
-    svg += `<line x1="${cx}" y1="${cy}" x2="${cx2}" y2="${cy2}" stroke="#6e7681" stroke-width="1" stroke-dasharray="2,2" opacity="0.5" />`;
-    const color = KIND_COLORS[satellites[i].kind] || KIND_COLORS.custom;
-    svg += `<rect x="${cx2 - 6}" y="${cy2 - 6}" width="12" height="12" rx="2" fill="${color}" opacity="0.7" />`;
+
+  // Carreteras (debajo de los nodos)
+  for (let i = 0; i < N; i++) {
+    const p = positions[i];
+    svg += `<line x1="${cx}" y1="${cy}" x2="${p.x.toFixed(1)}" y2="${p.y.toFixed(1)}" stroke="${roadColor}" stroke-width="${isPreview ? 2 : 3}" stroke-linecap="round" opacity="${isPreview ? 0.7 : 0.6}" />`;
+    if (!isPreview) {
+      svg += `<line x1="${cx}" y1="${cy}" x2="${p.x.toFixed(1)}" y2="${p.y.toFixed(1)}" stroke="#fff" stroke-width="0.6" stroke-dasharray="5,5" opacity="0.4" />`;
+    }
   }
-  svg += `<rect x="${cx - 18}" y="${cy - 18}" width="36" height="36" rx="3" fill="${KIND_COLORS.vps}" stroke="#fff" stroke-width="1.2" />`;
-  svg += `<circle cx="${cx}" cy="${cy - 18}" r="6" fill="#d4a017" />`;
-  svg += `<text x="${cx}" y="${cy + 4}" text-anchor="middle" fill="#fff" font-size="9" font-weight="600">VPS</text>`;
-  for (const b of buildings) {
-    const color = KIND_COLORS[b.svc.kind] || KIND_COLORS.custom;
-    svg += `<rect x="${b.x - 11}" y="${b.y - 9}" width="22" height="18" rx="2" fill="${color}" stroke="#fff" stroke-width="0.6" />`;
-    svg += `<text x="${b.x}" y="${b.y + 3}" text-anchor="middle" fill="#fff" font-size="7" font-weight="600">${esc(b.svc.kind)}</text>`;
+
+  // VPS centro
+  const vw = isPreview ? 60 : 170;
+  const vh = isPreview ? 38 : 90;
+  const vpsClick = isPreview ? "" : `data-action="open-svc" data-service-id="${esc(vpsService.id)}" style="cursor:pointer"`;
+  svg += `<g class="topo-vps" ${vpsClick}>
+    <rect x="${(cx - vw/2).toFixed(1)}" y="${(cy - vh/2).toFixed(1)}" width="${vw}" height="${vh}" rx="${isPreview ? 4 : 8}" fill="#8b949e" stroke="#fff" stroke-width="${isPreview ? 1 : 2}" />
+    <circle cx="${cx}" cy="${(cy - vh/2).toFixed(1)}" r="${isPreview ? 5 : 12}" fill="#d4a017" />
+    <text x="${cx}" y="${(cy - (isPreview ? 4 : 12)).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="${isPreview ? 9 : 13}" font-weight="700" letter-spacing="1">VPS</text>
+    ${!isPreview ? `<text x="${cx}" y="${cy + 8}" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">${esc((vpsService.name||"").substring(0, 20))}</text>
+      <text x="${cx}" y="${cy + 26}" text-anchor="middle" fill="#fff" font-size="10" opacity="0.85" font-family="monospace">${esc((vpsMetricsLine||"").substring(0, 28))}</text>` : ''}
+  </g>`;
+
+  // Nodos de contenedor
+  for (let i = 0; i < N; i++) {
+    const n = nodes[i];
+    const p = positions[i];
+    if (isPreview) {
+      // Solo un punto pequeño coloreado
+      svg += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="6" fill="${n.color}" stroke="#fff" stroke-width="0.8" opacity="0.95" />`;
+    } else {
+      const w = 112, h = 56;
+      const title = (n.declared ? n.declared.name : n.meta.label) || "?";
+      const sub = n.declared ? n.declared.kind : "container";
+      const envTxt = n.meta.env !== "global" ? n.meta.env : "";
+      const dataAttr = n.declared
+        ? `data-action="open-svc" data-service-id="${esc(n.declared.id)}"`
+        : `data-action="open-container" data-container-name="${esc(n.container.name)}"`;
+      svg += `<g class="topo-node" ${dataAttr} style="cursor:pointer">
+        <rect x="${(p.x - w/2).toFixed(1)}" y="${(p.y - h/2).toFixed(1)}" width="${w}" height="${h}" rx="6"
+              fill="${n.color}" stroke="#fff" stroke-width="1.5" opacity="0.96" />
+        <text x="${p.x.toFixed(1)}" y="${(p.y - 14).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="9" opacity="0.85" font-weight="600">${esc(envTxt)}</text>
+        <text x="${p.x.toFixed(1)}" y="${(p.y + 2).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">${esc(title.substring(0, 16))}</text>
+        <text x="${p.x.toFixed(1)}" y="${(p.y + 16).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="9" opacity="0.78">${esc(sub)}</text>
+      </g>`;
+    }
   }
-  if (N === 0 && satellites.length === 0) {
-    svg += `<text x="${cx}" y="${cy + 50}" text-anchor="middle" fill="#6e7681" font-size="9" font-style="italic">sin servicios alojados</text>`;
+
+  if (N === 0) {
+    const y = cy + (isPreview ? 56 : 110);
+    const msg = isPreview ? "sin servicios" : "sin servicios alojados — añade alguno o instala docker";
+    svg += `<text x="${cx}" y="${y}" text-anchor="middle" fill="#6e7681" font-size="${isPreview ? 9 : 12}" font-style="italic">${esc(msg)}</text>`;
   }
+
   svg += `</svg>`;
   return svg;
+}
+
+// Mini-map para la vista Mapa: usa la topología en formato preview con datos
+// reales de docker (si están cargados en vpsDetailCache).
+function renderMiniCityMap(vps, hosted, satellites, status) {
+  const nodes = buildTopologyNodes(vps, hosted);
+  return renderTopologySVG(nodes, vps, "", status, { preview: true });
 }
 
 function renderVpsExpanded(item, health) {
@@ -460,81 +584,40 @@ function _serviceKindToRoleGroup(kind, name) {
 }
 
 function renderHostedServicesSection(hostedServices, vpsService, vpsMetricsLine, vpsStatus) {
-  const docker = (detailVpsData && detailVpsData.data && detailVpsData.data.docker) || null;
-  const declaredByName = new Map();
-  for (const s of hostedServices) {
-    const cont = s.config && s.config.container;
-    if (cont) declaredByName.set(cont, s);
+  const nodes = buildTopologyNodes(vpsService, hostedServices);
+
+  // Resumen rápido por rol para ayudar al usuario (sin renderizar tarjetas abajo)
+  const byRole = new Map();
+  for (const n of nodes) {
+    const k = n.meta.role;
+    if (!byRole.has(k)) byRole.set(k, 0);
+    byRole.set(k, byRole.get(k) + 1);
+  }
+  const roleChips = CONTAINER_ROLE_GROUPS
+    .filter(g => byRole.has(g.key))
+    .map(g => `<span class="role-chip" style="background:${g.color}1f; color:${g.color}; border:1px solid ${g.color}55">${esc(g.label)} <b>${byRole.get(g.key)}</b></span>`)
+    .join("");
+
+  // Estado de la pre-carga
+  const detail = vpsDetailCache.get(vpsService.id);
+  const docker = detail && detail.data && detail.data.docker;
+  let dockerNote = "";
+  if (!detail) {
+    dockerNote = '<div class="muted topology-note">cargando contenedores…</div>';
+  } else if (docker && docker.available === false) {
+    dockerNote = '<div class="muted topology-note">⚠ docker no disponible en este host. Mostrando solo servicios declarados.</div>';
+  } else if (docker) {
+    const all = docker.containers || [];
+    const running = all.filter(c => (c.state || "").toLowerCase() === "running").length;
+    dockerNote = `<div class="muted topology-note">${running} contenedor${running !== 1 ? "es" : ""} running · ${all.length} totales</div>`;
   }
 
-  // Caso degenerado: docker aún cargando o no disponible → fallback simple
-  if (!docker || docker.available === false) {
-    const msg = !docker
-      ? "Cargando contenedores docker…"
-      : "docker no disponible en este host (instálalo o añade el usuario SSH al grupo docker)";
-    return `<section class="detail-services">
-      ${renderTopologySVG([], vpsService, vpsMetricsLine, vpsStatus)}
-      <div class="muted" style="padding:12px">${esc(msg)}</div>
-      ${hostedServices.length > 0
-        ? `<div class="service-section-card"><h4 class="service-section-title">Declarados (${hostedServices.length})</h4>
-            <div class="env-columns"><div class="env-column">
-              <div class="env-column-tiles">
-                ${hostedServices.map(s => renderUnifiedTile({declared: s, container: null, meta: classifyContainer((s.config&&s.config.container)||s.name)}, KIND_COLORS[s.kind] || KIND_COLORS.custom)).join("")}
-              </div>
-            </div></div></div>`
-        : ""}
-    </section>`;
-  }
-
-  const all = docker.containers || [];
-  const running = all.filter(c => (c.state || "").toLowerCase() === "running");
-
-  // Bucketize por rol (containers running + declared services sin container backing)
-  const grouped = new Map(CONTAINER_ROLE_GROUPS.map(g => [g.key, []]));
-  const matchedDeclaredIds = new Set();
-
-  for (const c of running) {
-    const meta = classifyContainer(c.name);
-    let declared = declaredByName.get(c.name) || null;
-    if (!declared) {
-      for (const [n, svc] of declaredByName) {
-        if (c.name === n || c.name.startsWith(n + ".")) { declared = svc; break; }
-      }
-    }
-    if (declared) matchedDeclaredIds.add(declared.id);
-    grouped.get(meta.role).push({ container: c, meta, declared });
-  }
-
-  for (const s of hostedServices) {
-    if (matchedDeclaredIds.has(s.id)) continue;
-    const declaredContainer = (s.config && s.config.container) || s.name;
-    const meta = classifyContainer(declaredContainer);
-    const role = _serviceKindToRoleGroup(s.kind, declaredContainer);
-    if (!grouped.has(role)) grouped.set(role, []);
-    grouped.get(role).push({ container: null, meta: { ...meta, role }, declared: s });
-  }
-
-  const nonEmpty = CONTAINER_ROLE_GROUPS.filter(g => (grouped.get(g.key) || []).length > 0);
-  const totalTiles = nonEmpty.reduce((n, g) => n + grouped.get(g.key).length, 0);
-
-  if (totalTiles === 0) {
-    return `<section class="detail-services">
-      ${renderTopologySVG([], vpsService, vpsMetricsLine, vpsStatus)}
-      <div class="muted" style="padding:12px">no hay contenedores corriendo ni servicios declarados</div>
-    </section>`;
-  }
-
-  let html = `<section class="detail-services">
-    ${renderTopologySVG(nonEmpty.map(g => ({...g, count: grouped.get(g.key).length})), vpsService, vpsMetricsLine, vpsStatus)}
-    <div class="services-summary muted">
-      ${totalTiles} servicio${totalTiles>1?"s":""} en ${nonEmpty.length} categor${nonEmpty.length>1?"ías":"ía"} ·
-      ${running.length} contenedor${running.length>1?"es":""} running de ${all.length} totales
-    </div>`;
-  for (const g of nonEmpty) {
-    html += renderSectionCard(g, grouped.get(g.key));
-  }
-  html += `</section>`;
-  return html;
+  return `<section class="detail-services">
+    ${renderTopologySVG(nodes, vpsService, vpsMetricsLine, vpsStatus)}
+    <div class="topology-legend">${roleChips}</div>
+    ${dockerNote}
+    <div class="topology-hint">Pincha el VPS o cualquier nodo para ver su detalle</div>
+  </section>`;
 }
 
 function renderTopologySVG(sectionNodes, vpsService, vpsMetricsLine, vpsStatus) {
@@ -584,95 +667,11 @@ function renderTopologySVG(sectionNodes, vpsService, vpsMetricsLine, vpsStatus) 
   return svg;
 }
 
-function renderSectionCard(group, items) {
-  // Sub-agrupa por env
-  const byEnv = { testing: [], staging: [], global: [] };
-  for (const it of items) {
-    const e = it.meta && it.meta.env;
-    (byEnv[e] || byEnv.global).push(it);
-  }
-  let envColsHtml = "";
-  for (const env of ["testing", "staging", "global"]) {
-    const list = byEnv[env];
-    if (list.length === 0) continue;
-    list.sort((a, b) => (a.meta.label || "").localeCompare(b.meta.label || ""));
-    const label = env === "testing" ? "TESTING (prod)" : env === "staging" ? "STAGING" : "GLOBAL";
-    const envClass = env === "testing" ? "env-col-testing" : env === "staging" ? "env-col-staging" : "env-col-global";
-    envColsHtml += `<div class="env-column ${envClass}">
-      <div class="env-column-header">${label} <span class="env-column-count">${list.length}</span></div>
-      <div class="env-column-tiles">
-        ${list.map(it => renderUnifiedTile(it, group.color)).join("")}
-      </div>
-    </div>`;
-  }
-  return `<div class="service-section-card" id="section-${esc(group.key)}" style="border-top:3px solid ${group.color}">
-    <h4 class="service-section-title">${esc(group.label)} <span class="service-section-count">${items.length}</span></h4>
-    <div class="env-columns">${envColsHtml}</div>
-  </div>`;
-}
+// (renderSectionCard eliminado — ver nota arriba)
 
-// Tile unificado: usado para containers running, declared services sin container,
-// y también para hosted services cuando docker está down. Estilo = tile declarado original.
-function renderUnifiedTile(item, color) {
-  const { container, meta, declared } = item;
-
-  // Nombre principal: si hay declared service, su .name (ej. "n8n (testing)").
-  // Si no, label del classifier (nombre limpio del container).
-  const title = declared ? declared.name : meta.label;
-
-  // Subtítulo: imagen del container si lo hay, o role del declared.
-  let subtitle = "";
-  if (container) {
-    subtitle = (container.image || "").substring(0, 50);
-  } else if (declared) {
-    subtitle = `kind: ${declared.kind}`;
-    if (declared.config && declared.config.container) {
-      subtitle += ` · container: ${declared.config.container}`;
-    }
-  }
-
-  // env badge
-  let envBadge = "";
-  if (meta.env === "testing") {
-    envBadge = '<span class="env-badge env-testing" title="entorno testing — producción según tu setup">testing</span>';
-  } else if (meta.env === "staging") {
-    envBadge = '<span class="env-badge env-staging">stg</span>';
-  }
-
-  // declared chip (kind del service vinculado)
-  const declaredChip = declared
-    ? `<span class="container-declared-chip" title="vinculado a service declarado ${esc(declared.kind)}/${esc(declared.name)}">${esc(declared.kind)}</span>`
-    : "";
-
-  // Métricas si hay container
-  const metric = container && (container.cpu || container.mem)
-    ? `<div class="tile-role muted">CPU ${esc(container.cpu || "-")} · MEM ${esc(container.mem || "-")}</div>`
-    : "";
-
-  // State pill
-  let pill = "";
-  if (container) {
-    pill = '<span class="health-pill health-pill-ok">running</span>';
-  } else if (declared && declared.config && declared.config.container) {
-    pill = '<span class="health-pill health-pill-bad">sin container running</span>';
-  } else if (declared) {
-    pill = '<span class="health-pill" style="background:rgba(110,118,129,0.2);color:#c9d1d9">declared</span>';
-  }
-
-  // Click: si hay declared, drawer del service (kind-specific). Si no, drawer container (logs).
-  const dataAttr = declared
-    ? `data-action="open-svc" data-service-id="${esc(declared.id)}"`
-    : `data-action="open-container" data-container-name="${esc(container.name)}"`;
-
-  return `
-    <div class="detail-tile" ${dataAttr} style="border-left:4px solid ${color}">
-      <div class="tile-kind">${envBadge} ${declaredChip}</div>
-      <div class="tile-name">${esc(title)}</div>
-      <div class="tile-role muted" title="${esc(subtitle)}">${esc(subtitle)}</div>
-      ${metric}
-      <div style="margin-top:6px">${pill}</div>
-    </div>`;
-}
+// (renderUnifiedTile / renderSectionCard eliminados en F8.5: la vista detalle
+//  ya no muestra tarjetas debajo de la topología; toda la info se obtiene
+//  haciendo click en los nodos del SVG.)
 
 function renderTile(svc, isSatellite = false) {
   const color = KIND_COLORS[svc.kind] || KIND_COLORS.custom;
@@ -698,18 +697,6 @@ function bindDetailHandlers() {
   });
   document.querySelectorAll('[data-action="open-container"]').forEach(el => {
     el.onclick = (ev) => { ev.stopPropagation(); openContainerDrawer(el.dataset.containerName); };
-  });
-  // Click en nodo de sección de la topología → scroll a su card
-  document.querySelectorAll('[data-action="scroll-section"]').forEach(el => {
-    el.onclick = (ev) => {
-      ev.stopPropagation();
-      const card = document.getElementById(`section-${el.dataset.sectionKey}`);
-      if (card) {
-        card.scrollIntoView({ behavior: "smooth", block: "start" });
-        card.classList.add("section-flash");
-        setTimeout(() => card.classList.remove("section-flash"), 1200);
-      }
-    };
   });
 }
 
@@ -1081,6 +1068,7 @@ function startPolling() {
     await fetchActiveAlerts();
     if (viewMode === "detail") renderVpsDetailView();
     else renderGrid();
+    fetchAllVpsDetails();  // background refresh de contenedores
   }, 30000);
 }
 

@@ -252,24 +252,50 @@
   letter-spacing: 0.5px;
 }
 
-/* Fase 8.4 — topología + sub-columnas testing/stg dentro de cada sección */
+/* Fase 8.5 — topología completa (cada container = nodo); cards eliminadas */
 .detail-services {
   margin-bottom: 24px;
 }
 .detail-topology {
   display: block;
   width: 100%;
-  max-width: 820px;
+  max-width: 980px;
   height: auto;
-  margin: 0 auto 12px auto;
+  margin: 0 auto 8px auto;
   background: rgba(255, 255, 255, 0.02);
   border: 1px solid var(--border);
   border-radius: 10px;
 }
 .detail-topology .topo-vps:hover rect,
-.detail-topology .topo-section-node:hover rect {
+.detail-topology .topo-node:hover rect {
   stroke: #d4a017;
   stroke-width: 2.5;
+}
+.topology-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  margin-top: 8px;
+  margin-bottom: 6px;
+}
+.role-chip {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 14px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.role-chip b { font-weight: 800; margin-left: 2px; }
+.topology-note, .topology-hint {
+  text-align: center;
+  font-size: 12px;
+  margin-top: 4px;
+}
+.topology-hint {
+  font-style: italic;
+  color: var(--muted);
+  margin-bottom: 16px;
 }
 .services-summary {
   text-align: center;
