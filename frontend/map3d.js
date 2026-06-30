@@ -535,7 +535,7 @@ onMouseDown = function(ev) {
   ndcFromEvent(ev);
   const hits = raycast();
   const picked = pickInteractive(hits);
-  if (picked && editMode && (picked.userData.type === "zone" || picked.userData.type === "city-footprint")) {
+  if (picked && editMode && sceneMode === "world" && (picked.userData.type === "zone" || picked.userData.type === "city-footprint")) {
     // start drag
     const ground = unprojectToGround(mouseNDC, camera);
     if (picked.userData.type === "zone") {
@@ -802,10 +802,12 @@ function cancelFly() {
 
 function easeInOut(t) { return t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2; }
 
-// HUD: botón "Ver mundo"
+// HUD: botón "Ver mundo" (Fase 3) y "← Volver al mundo" (Fase 4)
 function bindWorldBtn() {
   const wb = container.querySelector("#mapWorldBtn");
   if (wb) wb.onclick = () => flyToWorld();
+  const bb = container.querySelector("#mapBackBtn");
+  if (bb) bb.onclick = () => { if (typeof exitCity === "function") exitCity(); };
 }
 
 // --- Side panels (Task 9) -------------------------------------------------
@@ -822,12 +824,51 @@ function openZonePanel(zoneMesh) {
   const svc = zoneMesh.userData.service;
   const client = zoneMesh.userData.client;
   const project = zoneMesh.userData.project;
+  const inInterior = !!zoneMesh.userData.inInterior;
   const meta = (cityMap.get(`${client}/${project}`) || {}).projectMeta || {};
   const connections = (meta.connections || []).filter(c => c.from === svc.id || c.to === svc.id);
   const nameOf = id => {
     const m = (meta.services || []).find(x => x.id === id);
     return m ? m.name : id;
   };
+
+  // Bloques condicionales: solo en interior, mostrar Estado enriquecido + Métricas
+  let estadoBlock = "";
+  let metricasBlock = "";
+  if (inInterior) {
+    const m = mockMetrics.get(svc.id) || { status: "ok", cpu: 0, ram: 0, disk: 0, uptimeSeconds: 0 };
+    const cpuTxt = Math.round(m.cpu) + "%";
+    const ramTxt = Math.round(m.ram) + "%";
+    const diskTxt = Math.round(m.disk) + "%";
+    const upTxt = humanUptime(m.uptimeSeconds);
+    estadoBlock = `
+    <div class="sp-block">
+      <h4>Estado (simulado)</h4>
+      <div class="sp-status-row">
+        <span class="status-dot status-${m.status}"></span>
+        <span>${escapeHtml(statusText(m.status))}</span>
+      </div>
+      <div class="sp-status-mock-note">datos simulados · conectar Fase 2 para datos reales</div>
+    </div>`;
+    metricasBlock = `
+    <div class="sp-block">
+      <h4>Métricas (simuladas)</h4>
+      <div class="metric"><span>CPU</span><span data-metric="cpu">${cpuTxt}</span>
+        <div class="bar"><div data-metric-bar="cpu" style="width:${Math.round(m.cpu)}%"></div></div></div>
+      <div class="metric"><span>RAM</span><span data-metric="ram">${ramTxt}</span>
+        <div class="bar"><div data-metric-bar="ram" style="width:${Math.round(m.ram)}%"></div></div></div>
+      <div class="metric"><span>Disk</span><span data-metric="disk">${diskTxt}</span>
+        <div class="bar"><div data-metric-bar="disk" style="width:${Math.round(m.disk)}%"></div></div></div>
+      <div class="metric-uptime">Uptime: <span data-metric="uptime">${escapeHtml(upTxt)}</span></div>
+    </div>`;
+  } else {
+    estadoBlock = `
+    <div class="sp-block">
+      <h4>Estado</h4>
+      <div class="sp-placeholder">Monitor en vivo: disponible en Fase 2</div>
+    </div>`;
+  }
+
   sp.innerHTML = `
     <div class="sp-header">
       <div>
@@ -837,13 +878,11 @@ function openZonePanel(zoneMesh) {
       </div>
       <button class="sp-close" id="spCloseBtn">×</button>
     </div>
+    ${estadoBlock}
+    ${metricasBlock}
     <div class="sp-block">
       <h4>Config</h4>
       <pre class="sp-config-json">${escapeHtml(JSON.stringify(svc.config || {}, null, 2))}</pre>
-    </div>
-    <div class="sp-block">
-      <h4>Estado</h4>
-      <div class="sp-placeholder">Monitor en vivo: disponible en Fase 2</div>
     </div>
     <div class="sp-block">
       <h4>Conexiones (${connections.length})</h4>
@@ -887,6 +926,7 @@ function openCityPanel(cityGroup) {
       <div>${nServices} zona(s) · ${nConns} conexión(es)</div>
     </div>
     <div class="sp-actions">
+      <button class="btn primary" id="spEnterCity">» Entrar en la ciudad</button>
       <button class="btn" id="spOpenCity">Abrir editor</button>
       <button class="btn" id="spRenameCity">Renombrar proyecto</button>
       <button class="btn danger" id="spDeleteCity">Borrar proyecto</button>
@@ -895,6 +935,9 @@ function openCityPanel(cityGroup) {
   sidePanelOpen = true;
   sidePanelContext = { type: "city", client: ud.client, project: ud.project };
   sp.querySelector("#spCloseBtn").onclick = closeSidePanel;
+  sp.querySelector("#spEnterCity").onclick = () => {
+    if (typeof enterCity === "function") enterCity(ud.client, ud.project);
+  };
   sp.querySelector("#spOpenCity").onclick = () => openProjectMapForm(ud.client, ud.project);
   sp.querySelector("#spRenameCity").onclick = () => renameProjectFromPanel(ud.client, ud.project);
   sp.querySelector("#spDeleteCity").onclick = () => deleteProjectFromPanel(ud.client, ud.project);
@@ -957,8 +1000,15 @@ async function deleteZoneFromPanel(client, project, serviceId) {
   meta.services = (meta.services || []).filter(s => s.id !== serviceId);
   meta.connections = (meta.connections || []).filter(c => c.from !== serviceId && c.to !== serviceId);
   await doPersist(client, project, meta);
-  // Reconstruye solo esa ciudad
+  // Reconstruye solo esa ciudad (representación del world)
   rebuildCity(client, project);
+  // Si estamos en el interior de esa misma ciudad, reconstruir también el interior
+  if (sceneMode === `interior:${client}/${project}` && interiorGroup) {
+    scene.remove(interiorGroup);
+    disposeGroup(interiorGroup);
+    interiorGroup = buildInterior(client, project);
+    scene.add(interiorGroup);
+  }
   closeSidePanel();
   markDirty();
 }
@@ -1023,6 +1073,11 @@ function onKeyDown(ev) {
   }
   // Si hay side panel abierto, cerrarlo
   if (sidePanelOpen) { closeSidePanel(); return; }
+  // Si estamos en interior, salir al mundo (Fase 4)
+  if (sceneMode.startsWith("interior:")) {
+    if (typeof exitCity === "function") exitCity();
+    return;
+  }
   // Si Edit Mode activo, desactivar
   if (editMode) { setEditMode(false); return; }
   // Si no estamos en vista mundo, fly-to-world
@@ -1030,3 +1085,385 @@ function onKeyDown(ev) {
 }
 
 window.addEventListener("keydown", onKeyDown);
+
+// ============================================================ //
+// Fase 4 — Interior de la ciudad (drill-in)                     //
+// ============================================================ //
+
+// Estado nuevo
+let sceneMode = "world";              // "world" | "interior:<client>/<project>"
+let interiorGroup = null;             // THREE.Group con el interior actual (null en world)
+let worldCameraSnapshot = null;       // {position, frustumSize} para restaurar al salir
+let savedEditModeBeforeEnter = false; // recordar Edit Mode al entrar para restaurar al salir
+const mockMetrics = new Map();        // serviceId → {status, cpu, ram, disk, uptimeSeconds, lastUpdate}
+let mockTicker = null;                // setInterval handle
+const INTERIOR_FRUSTUM     = 25;
+const INTERIOR_FRUSTUM_MIN = 10;
+const INTERIOR_FRUSTUM_MAX = 40;
+const BARRIO_RADIUS_SLOT   = 10;      // radio donde se posicionan los barrios
+const BARRIO_FOOTPRINT_R   = 4;       // radio del footprint circular de un barrio
+const COMPONENT_RADIUS     = 2;       // radio del círculo interior donde se colocan los componentes
+const COMPONENT_SCALE      = 2;       // escala respecto a la primitiva del world
+
+// Mapping kind → rol semántico para agrupar barrios por categoría
+// (en vez de "barrio vps" + "barrio docker" separados, agrupamos en "infraestructura")
+const KIND_ROLE = {
+  vps:      "infraestructura",
+  docker:   "infraestructura",
+  postgres: "base de datos",
+  n8n:      "backend",
+  chatwoot: "comunicaciones",
+  github:   "código",
+  linear:   "gestión",
+  custom:   "otros",
+};
+
+// Colores para el footprint del barrio según rol
+const ROLE_COLORS = {
+  "infraestructura": 0x8b949e,
+  "base de datos":   0x336791,
+  "backend":         0xa371f7,
+  "comunicaciones":  0xf48120,
+  "código":          0xe6edf3,
+  "gestión":         0x5e6ad2,
+  "otros":           0x6e7681,
+};
+
+function roleOf(kind) { return KIND_ROLE[kind] || KIND_ROLE.custom; }
+
+// Helpers --------------------------------------------------- //
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function simpleHash(str) {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) {
+    h = (((h << 5) + h) + str.charCodeAt(i)) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function humanUptime(seconds) {
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function statusText(status) {
+  return status === "ok"   ? "operativo"
+       : status === "warn" ? "advertencia"
+       :                     "caído";
+}
+
+// Stubs — se implementan en Tasks 3-7
+let enterCity;
+let exitCity;
+let buildInterior;
+let initMockMetricsForServices;
+let startMockTicker;
+let stopMockTicker;
+let refreshOpenPanelMetrics;
+let showHudInterior;
+
+// Implementación de showHudInterior (visibilidad de botones HUD)
+showHudInterior = function(inInterior) {
+  const back = container.querySelector("#mapBackBtn");
+  const edit = container.querySelector("#mapEditToggle");
+  if (back) back.classList.toggle("hidden", !inInterior);
+  if (edit) edit.classList.toggle("hidden", !!inInterior);
+};
+
+enterCity = function(client, project) {
+  if (!client || !project) return;
+  if (sceneMode.startsWith("interior:")) return;
+
+  worldCameraSnapshot = {
+    position: camera.position.clone(),
+    frustumSize: camera.userData.frustumSize,
+  };
+  savedEditModeBeforeEnter = editMode;
+  if (editMode) setEditMode(false);
+
+  worldGroup.visible = false;
+
+  if (sidePanelOpen) closeSidePanel();
+
+  // Inicializar mock metrics ANTES de buildInterior para que las labels los lean
+  if (typeof initMockMetricsForServices === "function") {
+    const rec = cityMap.get(`${client}/${project}`);
+    if (rec) initMockMetricsForServices(rec.projectMeta.services || []);
+  }
+
+  interiorGroup = buildInterior(client, project);
+  scene.add(interiorGroup);
+
+  camera.position.set(50, 50, 50);
+  setFrustum(INTERIOR_FRUSTUM);
+  camera.lookAt(0, 0, 0);
+
+  sceneMode = `interior:${client}/${project}`;
+  if (typeof showHudInterior === "function") showHudInterior(true);
+
+  if (typeof startMockTicker === "function") startMockTicker();
+
+  markDirty();
+};
+
+exitCity = function() {
+  if (!sceneMode.startsWith("interior:")) return;
+
+  if (typeof stopMockTicker === "function") stopMockTicker();
+
+  if (sidePanelOpen) closeSidePanel();
+
+  if (interiorGroup) {
+    scene.remove(interiorGroup);
+    disposeGroup(interiorGroup);
+    interiorGroup = null;
+  }
+
+  worldGroup.visible = true;
+
+  if (worldCameraSnapshot) {
+    camera.position.copy(worldCameraSnapshot.position);
+    setFrustum(worldCameraSnapshot.frustumSize);
+    camera.lookAt(0, 0, 0);
+    worldCameraSnapshot = null;
+  }
+
+  if (savedEditModeBeforeEnter) setEditMode(true);
+  savedEditModeBeforeEnter = false;
+
+  sceneMode = "world";
+  if (typeof showHudInterior === "function") showHudInterior(false);
+
+  markDirty();
+};
+
+buildInterior = function(client, project) {
+  const g = new THREE.Group();
+  g.userData = { type: "interior", client, project };
+
+  const cityRec = cityMap.get(`${client}/${project}`);
+  const services = cityRec && cityRec.projectMeta && cityRec.projectMeta.services
+    ? cityRec.projectMeta.services
+    : [];
+
+  // Empty state — ciudad sin servicios
+  if (services.length === 0) {
+    const emptyDiv = document.createElement("div");
+    emptyDiv.className = "interior-empty";
+    emptyDiv.innerHTML = '<strong>Ciudad vacía</strong>Añade servicios en el editor (Proyectos → Mapa)';
+    const emptyLabel = new CSS2DObject(emptyDiv);
+    emptyLabel.position.set(0, 1, 0);
+    g.add(emptyLabel);
+    return g;
+  }
+
+  // Agrupar por ROL (categoría semántica) en vez de por kind directo:
+  // así "infraestructura" agrupa vps + docker, "base de datos" agrupa postgres, etc.
+  const byRole = new Map();
+  for (const s of services) {
+    const r = roleOf(s.kind);
+    if (!byRole.has(r)) byRole.set(r, []);
+    byRole.get(r).push(s);
+  }
+
+  const barrioRoles = [...byRole.keys()];
+  const N = barrioRoles.length;
+
+  // Mapa serviceId → mesh global (para que los cables del Task 5 puedan encontrarlos)
+  const interiorZoneMeshes = new Map();
+  g.userData.interiorZoneMeshes = interiorZoneMeshes;
+
+  barrioRoles.forEach((role, idx) => {
+    const barrio = new THREE.Group();
+    barrio.userData = { type: "barrio", role };
+
+    // Posición polar (N=1: centro)
+    if (N === 1) {
+      barrio.position.set(0, 0, 0);
+    } else {
+      const angle = (2 * Math.PI * idx) / N;
+      barrio.position.set(
+        BARRIO_RADIUS_SLOT * Math.cos(angle),
+        0,
+        BARRIO_RADIUS_SLOT * Math.sin(angle)
+      );
+    }
+
+    // Footprint del barrio: color del ROL
+    const roleColor = ROLE_COLORS[role] || ROLE_COLORS["otros"];
+    const footprintGeo = new THREE.CircleGeometry(BARRIO_FOOTPRINT_R, 32);
+    const footprintMat = new THREE.MeshBasicMaterial({
+      color: roleColor, opacity: 0.25, transparent: true, side: THREE.DoubleSide,
+    });
+    const footprint = new THREE.Mesh(footprintGeo, footprintMat);
+    footprint.rotation.x = -Math.PI / 2;
+    footprint.position.y = 0.02;
+    footprint.userData = { type: "barrio-footprint", role };
+    barrio.add(footprint);
+
+    // Label del barrio: nombre del ROL
+    const lblDiv = document.createElement("div");
+    lblDiv.className = "barrio-label";
+    lblDiv.textContent = `barrio ${role}`;
+    const barrioLabel = new CSS2DObject(lblDiv);
+    barrioLabel.position.set(0, 0.5, 0);
+    barrio.add(barrioLabel);
+
+    // Componentes (zonas) dentro del barrio — cada uno usa SU propia primitiva
+    // y color del KIND (así dentro del barrio sigues distinguiendo tipos)
+    const items = byRole.get(role);
+    const M = items.length;
+    items.forEach((svc, i) => {
+      const angle = (2 * Math.PI * i) / Math.max(M, 3);
+      const lx = COMPONENT_RADIUS * Math.cos(angle);
+      const lz = COMPONENT_RADIUS * Math.sin(angle);
+
+      const geoFactory = ZONE_PRIMITIVES[svc.kind] || ZONE_PRIMITIVES.custom;
+      const geo = geoFactory();
+      const kindColor = ZONE_COLORS[svc.kind] || ZONE_COLORS.custom;
+      const mat = new THREE.MeshStandardMaterial({ color: kindColor });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.scale.set(COMPONENT_SCALE, COMPONENT_SCALE, COMPONENT_SCALE);
+      mesh.position.set(lx, ZONE_Y * COMPONENT_SCALE, lz);
+      mesh.userData = {
+        type: "zone",
+        service: svc,
+        client, project,
+        inInterior: true,
+      };
+      barrio.add(mesh);
+      interiorZoneMeshes.set(svc.id, mesh);
+
+      // Label CSS2D con dot de estado
+      const m = mockMetrics.get(svc.id);
+      const statusCls = m ? `status-${m.status}` : "status-ok";
+      const zlbl = document.createElement("div");
+      zlbl.className = "zone-label";
+      zlbl.dataset.serviceId = svc.id;
+      zlbl.innerHTML = `<span class="status-dot ${statusCls}"></span><span>${escapeHtml(svc.name)} <span style="color:var(--muted);font-size:10px">[${escapeHtml(svc.kind)}]</span></span>`;
+      const label = new CSS2DObject(zlbl);
+      label.position.set(0, 2.2, 0);
+      mesh.add(label);
+    });
+
+    g.add(barrio);
+  });
+
+  // (cables abajo)
+  // Cables (intra-ciudad) renderizados como carreteras (tubo asfalto + dashed encima)
+  const connections = cityRec && cityRec.projectMeta && cityRec.projectMeta.connections
+    ? cityRec.projectMeta.connections
+    : [];
+  for (const conn of connections) {
+    const from = interiorZoneMeshes.get(conn.from);
+    const to   = interiorZoneMeshes.get(conn.to);
+    if (!from || !to) continue;
+
+    // Posiciones en coords mundo (cada mesh está dentro de su barrio Group)
+    const p0 = new THREE.Vector3();
+    const p1 = new THREE.Vector3();
+    from.getWorldPosition(p0);
+    to.getWorldPosition(p1);
+    p0.y = ZONE_Y * 0.6;
+    p1.y = ZONE_Y * 0.6;
+
+    // Curva suave entre los dos puntos
+    const mid = new THREE.Vector3().addVectors(p0, p1).multiplyScalar(0.5);
+    mid.y = ZONE_Y * 0.65;
+    const curve = new THREE.CatmullRomCurve3([p0, mid, p1]);
+
+    // Tubo asfalto
+    const tubeGeo = new THREE.TubeGeometry(curve, 24, 0.18, 8, false);
+    const tubeMat = new THREE.MeshBasicMaterial({ color: 0x333740 });
+    const tube = new THREE.Mesh(tubeGeo, tubeMat);
+    tube.userData = { type: "interior-road-asphalt", connection: conn };
+    g.add(tube);
+
+    // Líneas blancas dashed encima
+    const segments = 48;
+    const pts = [];
+    for (let i = 0; i <= segments; i++) {
+      const p = curve.getPoint(i / segments);
+      p.y += 0.05;
+      pts.push(p);
+    }
+    const lineGeo = new THREE.BufferGeometry().setFromPoints(pts);
+    const lineMat = new THREE.LineDashedMaterial({
+      color: 0xffffff,
+      dashSize: 0.5,
+      gapSize: 0.5,
+      linewidth: 1,
+    });
+    const line = new THREE.Line(lineGeo, lineMat);
+    line.computeLineDistances();
+    line.userData = { type: "interior-road-line", connection: conn };
+    g.add(line);
+  }
+
+  return g;
+};
+
+initMockMetricsForServices = function(services) {
+  for (const s of services) {
+    if (mockMetrics.has(s.id)) continue;    // ya inicializado en esta sesión
+    const h = simpleHash(s.id);
+    const mod = h % 10;
+    const status = mod < 7 ? "ok" : mod < 9 ? "warn" : "down";
+    const cpu  = 20 + (h % 60);
+    const ram  = 30 + ((h >>> 8) % 50);
+    const disk = 10 + ((h >>> 16) % 70);
+    const uptimeSeconds = 86400 + ((h >>> 4) % (86400 * 30));
+    mockMetrics.set(s.id, {
+      status, cpu, ram, disk, uptimeSeconds, lastUpdate: 0,
+    });
+  }
+};
+
+startMockTicker = function() {
+  if (mockTicker) return;
+  mockTicker = setInterval(() => {
+    if (!sceneMode.startsWith("interior:")) return;
+    for (const m of mockMetrics.values()) {
+      m.cpu  = clamp(m.cpu  + (Math.random() * 6 - 3), 0, 100);
+      m.ram  = clamp(m.ram  + (Math.random() * 4 - 2), 0, 100);
+      m.disk = clamp(m.disk + (Math.random() * 1 - 0.5), 0, 100);
+      m.uptimeSeconds += 2;
+      m.lastUpdate = Date.now();
+    }
+    if (typeof refreshOpenPanelMetrics === "function") refreshOpenPanelMetrics();
+  }, 2000);
+};
+
+stopMockTicker = function() {
+  if (mockTicker) {
+    clearInterval(mockTicker);
+    mockTicker = null;
+  }
+};
+
+refreshOpenPanelMetrics = function() {
+  const sp = container.querySelector("#mapSidePanel");
+  if (!sp || sp.classList.contains("hidden")) return;
+  if (!sidePanelContext || sidePanelContext.type !== "zone") return;
+  const id = sidePanelContext.serviceId;
+  const m = mockMetrics.get(id);
+  if (!m) return;
+  const cpuTxt = Math.round(m.cpu) + "%";
+  const ramTxt = Math.round(m.ram) + "%";
+  const diskTxt = Math.round(m.disk) + "%";
+  const upTxt = humanUptime(m.uptimeSeconds);
+  const updateField = (sel, val) => { const el = sp.querySelector(sel); if (el) el.textContent = val; };
+  const updateBar = (sel, val) => { const el = sp.querySelector(sel); if (el) el.style.width = val + "%"; };
+  updateField('[data-metric="cpu"]',  cpuTxt);
+  updateField('[data-metric="ram"]',  ramTxt);
+  updateField('[data-metric="disk"]', diskTxt);
+  updateField('[data-metric="uptime"]', upTxt);
+  updateBar('[data-metric-bar="cpu"]',  Math.round(m.cpu));
+  updateBar('[data-metric-bar="ram"]',  Math.round(m.ram));
+  updateBar('[data-metric-bar="disk"]', Math.round(m.disk));
+};
