@@ -10,9 +10,11 @@ let expandedVpsIds = new Set();
 // Fase 8 — vista detalle
 let viewMode = "grid";          // "grid" | "detail"
 let detailVpsId = null;         // id del VPS en detalle (null si no)
-let detailServiceId = null;     // service id del drawer abierto
+let detailServiceId = null;     // service id del drawer abierto (declarado)
+let detailContainerName = null; // container abierto en drawer (no declarado)
 let activeAlerts = [];          // último snapshot de /api/alerts/active
 let pgDrawerTab = "monitor";    // tab del drawer postgres
+let detailVpsData = null;       // último /api/services/detail del VPS (para docker.containers)
 
 const KIND_COLORS = {
   vps:"#8b949e", n8n:"#a371f7", docker:"#2496ed", chatwoot:"#f48120",
@@ -308,17 +310,37 @@ function enterDetail(vpsId) {
   viewMode = "detail";
   detailVpsId = vpsId;
   detailServiceId = null;
+  detailContainerName = null;
+  detailVpsData = null;
   pgDrawerTab = "monitor";
   document.getElementById("map-grid").classList.add("hidden");
   const view = document.getElementById("vps-detail-view");
   if (view) view.classList.remove("hidden");
+  // Render inmediato (sin contenedores aún) + fetch VPS detail en paralelo
   renderVpsDetailView();
+  fetchVpsDetail();
+}
+
+async function fetchVpsDetail() {
+  if (!detailVpsId) return;
+  const pos = findClientProjectForService(detailVpsId);
+  if (!pos) return;
+  try {
+    const r = await fetch(`/api/services/detail?client=${encodeURIComponent(pos.client)}&project=${encodeURIComponent(pos.project)}&service=${encodeURIComponent(detailVpsId)}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    detailVpsData = data;
+    // Re-render para reflejar los contenedores discovered
+    if (viewMode === "detail") renderVpsDetailView();
+  } catch (e) { /* ignore */ }
 }
 
 function exitDetail() {
   viewMode = "grid";
   detailVpsId = null;
   detailServiceId = null;
+  detailContainerName = null;
+  detailVpsData = null;
   closeServiceDrawer();
   const view = document.getElementById("vps-detail-view");
   if (view) view.classList.add("hidden");
@@ -386,10 +408,78 @@ function renderVpsDetailView() {
       </div>
     </section>`;
   }
+
+  // Fase 8.1 — contenedores docker descubiertos vía probe_vps
+  html += renderDockerContainersSection(item.hostedServices);
+
   html += `<aside id="svc-drawer" class="hidden"></aside>`;
   view.innerHTML = html;
   bindDetailHandlers();
   if (detailServiceId) openServiceDrawer(detailServiceId);
+  else if (detailContainerName) openContainerDrawer(detailContainerName);
+}
+
+function renderDockerContainersSection(hostedServices) {
+  const docker = (detailVpsData && detailVpsData.data && detailVpsData.data.docker) || null;
+  if (!docker) {
+    return `<section class="detail-containers">
+      <h4>Contenedores Docker</h4>
+      <div class="muted" style="padding:12px">Cargando contenedores…</div>
+    </section>`;
+  }
+  if (docker.available === false) {
+    return `<section class="detail-containers">
+      <h4>Contenedores Docker</h4>
+      <div class="muted" style="padding:12px">docker no disponible en este host (o el usuario SSH no tiene acceso)</div>
+    </section>`;
+  }
+  const containers = docker.containers || [];
+  if (containers.length === 0) {
+    return `<section class="detail-containers">
+      <h4>Contenedores Docker (0)</h4>
+      <div class="muted" style="padding:12px">no hay contenedores corriendo</div>
+    </section>`;
+  }
+  // Detectar qué contenedores ya están "declarados" como service.config.container
+  const declaredByName = new Map();
+  for (const s of hostedServices) {
+    const cont = s.config && s.config.container;
+    if (cont) declaredByName.set(cont, s);
+  }
+  return `<section class="detail-containers">
+    <h4>Contenedores Docker (${containers.length})</h4>
+    <div class="detail-tiles">
+      ${containers.map(c => renderContainerTile(c, declaredByName)).join("")}
+    </div>
+  </section>`;
+}
+
+function renderContainerTile(c, declaredByName) {
+  // Matchear por prefijo: container "n8n.1.abc" matchea declarado "n8n"
+  let declared = declaredByName.get(c.name);
+  if (!declared) {
+    for (const [name, svc] of declaredByName) {
+      if (c.name === name || c.name.startsWith(name + ".")) { declared = svc; break; }
+    }
+  }
+  const stateClass = (c.state || "").toLowerCase() === "running" ? "ok" : "bad";
+  const stateBadge = `<span class="health-pill health-pill-${stateClass}">${esc(c.state || "?")}</span>`;
+  const declaredChip = declared
+    ? `<span class="container-declared-chip" title="declarado como ${esc(declared.kind)}/${esc(declared.name)}">declarado</span>`
+    : "";
+  const metric = (c.cpu || c.mem)
+    ? `<div class="tile-role muted">CPU ${esc(c.cpu || "-")} · MEM ${esc(c.mem || "-")}</div>`
+    : "";
+  return `
+    <div class="detail-tile detail-tile-container"
+         data-container-name="${esc(c.name)}" data-action="open-container"
+         style="border-left:4px solid ${KIND_COLORS.docker}">
+      <div class="tile-kind">container ${declaredChip}</div>
+      <div class="tile-name">${esc(c.name)}</div>
+      <div class="tile-role muted" title="${esc(c.image)}">${esc((c.image||"").substring(0,40))}</div>
+      ${metric}
+      <div style="margin-top:6px">${stateBadge}</div>
+    </div>`;
 }
 
 function renderTile(svc, isSatellite = false) {
@@ -414,6 +504,55 @@ function bindDetailHandlers() {
   document.querySelectorAll('[data-action="open-svc"]').forEach(el => {
     el.onclick = (ev) => { ev.stopPropagation(); openServiceDrawer(el.dataset.serviceId); };
   });
+  document.querySelectorAll('[data-action="open-container"]').forEach(el => {
+    el.onclick = (ev) => { ev.stopPropagation(); openContainerDrawer(el.dataset.containerName); };
+  });
+}
+
+async function openContainerDrawer(containerName) {
+  detailServiceId = null;
+  detailContainerName = containerName;
+  const drawer = document.getElementById("svc-drawer");
+  if (!drawer) return;
+  drawer.classList.remove("hidden");
+  drawer.innerHTML = `
+    <div class="drawer-header">
+      <h3>Cargando container ${esc(containerName)}…</h3>
+      <button class="drawer-close" id="drawer-close-btn">✕</button>
+    </div>
+    <div class="drawer-loading">Consultando docker logs por SSH…</div>`;
+  bindDrawerCloseAgain();
+  const pos = findClientProjectForService(detailVpsId);
+  if (!pos) {
+    drawer.innerHTML = renderDrawerError("no se localizó client/project del VPS host");
+    bindDrawerCloseAgain();
+    return;
+  }
+  const url = `/api/services/container?client=${encodeURIComponent(pos.client)}` +
+              `&project=${encodeURIComponent(pos.project)}` +
+              `&vps=${encodeURIComponent(detailVpsId)}` +
+              `&container=${encodeURIComponent(containerName)}`;
+  let resp;
+  try {
+    const r = await fetch(url);
+    resp = await r.json();
+  } catch (e) {
+    drawer.innerHTML = renderDrawerError("fetch error: " + e.message);
+    bindDrawerCloseAgain();
+    return;
+  }
+  if (resp.error) {
+    drawer.innerHTML = renderDrawerError(resp.error);
+    bindDrawerCloseAgain();
+    return;
+  }
+  drawer.innerHTML = `
+    <div class="drawer-header">
+      <h3>container · ${esc(containerName)}</h3>
+      <button class="drawer-close" id="drawer-close-btn">✕</button>
+    </div>
+    ${renderLogsDrawer(resp.data)}`;
+  bindDrawerCloseAgain();
 }
 
 // ====================== Drawer del servicio ====================== //
@@ -484,6 +623,7 @@ function bindDrawerCloseAgain() {
 
 function closeServiceDrawer() {
   detailServiceId = null;
+  detailContainerName = null;
   const drawer = document.getElementById("svc-drawer");
   if (drawer) {
     drawer.classList.add("hidden");

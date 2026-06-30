@@ -1526,6 +1526,37 @@ def probe_container_logs(vps_service: dict, target_service: dict) -> dict:
     }}
 
 
+def get_container_detail(client: str, project: str, vps_id: str, container: str) -> dict:
+    """Detalle de un contenedor docker arbitrario (no necesariamente declarado
+    como service). Reusa probe_container_logs sobre la VPS host indicada.
+    Cachea por clave (vps_id, container)."""
+    now = time.time()
+    cache_key = f"{vps_id}::{container}"
+    with DETAIL_LOCK:
+        cached = DETAIL_CACHE.get(cache_key)
+    if cached and (now - cached["ts"]) < DETAIL_TTL:
+        return cached["data"]
+
+    meta = load_project_meta(client, project)
+    vps_service = _find_service(meta, vps_id)
+    if not vps_service or vps_service.get("kind") != "vps":
+        return {"error": "VPS host no encontrado", "data": None,
+                "service": None, "host_vps": None, "ts": now}
+    synthetic = {"id": cache_key, "kind": "docker", "name": container,
+                 "config": {"container": container}}
+    result = probe_container_logs(vps_service, synthetic)
+    response = {
+        "service": {"id": cache_key, "kind": "container", "name": container},
+        "host_vps": {"id": vps_service["id"], "name": vps_service["name"]},
+        "ts": now,
+        "data": result["data"],
+        "error": result["error"],
+    }
+    with DETAIL_LOCK:
+        DETAIL_CACHE[cache_key] = {"ts": now, "data": response}
+    return response
+
+
 def get_service_detail(client: str, project: str, service_id: str) -> dict:
     """Devuelve detalle del servicio. Cachea por service_id con TTL DETAIL_TTL."""
     now = time.time()
@@ -1789,6 +1820,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ("/api/clients", "/api/projects", "/api/repos",
                       "/api/repos/branches", "/api/projects/meta", "/api/world",
                       "/api/projects/health", "/api/services/detail",
+                      "/api/services/container",
                       "/api/projects/alerts", "/api/alerts/active"):
             if not self._is_authed():
                 return self._json(401, {"error": "no autorizado"})
@@ -1809,6 +1841,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._service_detail(q.get("client", [""])[0],
                                      q.get("project", [""])[0],
                                      q.get("service", [""])[0])
+            elif path == "/api/services/container":
+                self._container_detail(q.get("client", [""])[0],
+                                       q.get("project", [""])[0],
+                                       q.get("vps", [""])[0],
+                                       q.get("container", [""])[0])
             elif path == "/api/projects/alerts":
                 self._projects_alerts_get(q.get("client", [""])[0],
                                           q.get("project", [""])[0])
@@ -2169,6 +2206,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": str(e)})
         except Exception as e:
             return self._json(500, {"error": f"detail error: {e}"})
+        return self._json(200, resp)
+
+    def _container_detail(self, client: str, project: str, vps: str, container: str):
+        if not client or not project or not vps or not container:
+            return self._json(400, {"error": "client/project/vps/container requeridos"})
+        if not (valid_name(client) and valid_name(project)):
+            return self._json(400, {"error": "nombre inválido"})
+        # No validamos formato de `container` (puede llevar dots, guiones, etc.)
+        # pero limitamos longitud para evitar abusos.
+        if len(container) > 200:
+            return self._json(400, {"error": "container demasiado largo"})
+        try:
+            resp = get_container_detail(client, project, vps, container)
+        except ValueError as e:
+            return self._json(400, {"error": str(e)})
+        except Exception as e:
+            return self._json(500, {"error": f"container detail error: {e}"})
         return self._json(200, resp)
 
     def _projects_alerts_get(self, c: str, p: str):

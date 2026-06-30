@@ -231,6 +231,27 @@
   letter-spacing: 0.5px; color: var(--muted); margin: 0 0 8px 0; }
 .detail-tile-sat { opacity: 0.85; }
 
+/* Fase 8.1 — Contenedores docker descubiertos */
+.detail-containers { margin-bottom: 24px; }
+.detail-containers h4 {
+  font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.5px; color: var(--muted); margin: 0 0 8px 0;
+}
+.detail-tile-container { background: var(--bg); }
+.detail-tile-container .tile-name { font-family: monospace; font-size: 13px; }
+.container-declared-chip {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(94, 106, 210, 0.15);
+  color: #a5b4fc;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
 /* Drawer */
 #svc-drawer {
   position: fixed;
