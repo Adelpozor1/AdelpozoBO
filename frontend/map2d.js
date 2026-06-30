@@ -13,6 +13,7 @@ let viewMode = "grid";          // "grid" | "detail"
 let detailVpsId = null;         // id del VPS en detalle (null si no)
 let detailServiceId = null;     // service id del drawer abierto (declarado)
 let detailContainerName = null; // container abierto en drawer (no declarado)
+let detailRoleKey = null;       // role aggregate abierto en drawer (Fase 8.6)
 let activeAlerts = [];          // último snapshot de /api/alerts/active
 let pgDrawerTab = "monitor";    // tab del drawer postgres
 let detailVpsData = null;       // último /api/services/detail del VPS (para docker.containers)
@@ -267,19 +268,48 @@ function buildTopologyNodes(vps, hostedServices) {
   return nodes;
 }
 
+// Agrega los nodos por categoría (rol). Devuelve una lista de aggregates:
+//   [{ groupKey, label, color, items: [ {container, declared, meta, ...} ] }]
+// El orden coincide con CONTAINER_ROLE_GROUPS.
+function buildRoleAggregates(vps, hostedServices) {
+  const perContainer = buildTopologyNodes(vps, hostedServices);
+  const byGroup = new Map();
+  for (const n of perContainer) {
+    const key = n.groupKey;
+    if (!byGroup.has(key)) {
+      const g = CONTAINER_ROLE_GROUPS.find(x => x.key === key)
+             || { key, label: key, color: n.color };
+      byGroup.set(key, { groupKey: key, label: g.label, color: g.color, items: [] });
+    }
+    byGroup.get(key).items.push(n);
+  }
+  const out = [];
+  for (const g of CONTAINER_ROLE_GROUPS) {
+    if (byGroup.has(g.key)) out.push(byGroup.get(g.key));
+  }
+  // Por si aparece algún rol no listado
+  for (const [key, agg] of byGroup) {
+    if (!CONTAINER_ROLE_GROUPS.find(g => g.key === key)) out.push(agg);
+  }
+  return out;
+}
+
 // Topología SVG. Si opts.preview, formato pequeño (sin labels, sin click).
 // Si !preview, formato grande con labels, click por nodo, etc.
-function renderTopologySVG(nodes, vpsService, vpsMetricsLine, vpsStatus, opts = {}) {
+// `roleAggregates` viene de buildRoleAggregates(): un nodo por categoría
+// (no por container individual).
+function renderTopologySVG(roleAggregates, vpsService, vpsMetricsLine, vpsStatus, opts = {}) {
   const isPreview = !!opts.preview;
   const roadColor = vpsStatus === "ok" ? "#22c55e" : vpsStatus === "warn" ? "#f59e0b" : "#ef4444";
   const cls = isPreview ? "vps-mini-map" : "detail-topology";
-  const N = nodes.length;
+  const aggregates = roleAggregates || [];
+  const N = aggregates.length;
 
   // Tamaño de cada nodo y separación mínima en la circunferencia
-  const boxW    = isPreview ? 0   : 110;
-  const boxH    = isPreview ? 0   : 50;
-  const spacing = isPreview ? 18  : 130;   // distancia mínima entre centros sobre la circunferencia
-  const minR    = isPreview ? 70  : 200;
+  const boxW    = isPreview ? 0   : 130;
+  const boxH    = isPreview ? 0   : 56;
+  const spacing = isPreview ? 22  : 150;   // distancia mínima entre centros sobre la circunferencia
+  const minR    = isPreview ? 65  : 180;
 
   // Radio dinámico para que los nodos no se solapen: si hay muchos,
   // se aumenta. Y el viewBox crece en consecuencia.
@@ -324,27 +354,25 @@ function renderTopologySVG(nodes, vpsService, vpsMetricsLine, vpsStatus, opts = 
       <text x="${cx}" y="${cy + 26}" text-anchor="middle" fill="#fff" font-size="10" opacity="0.85" font-family="monospace">${esc((vpsMetricsLine||"").substring(0, 28))}</text>` : ''}
   </g>`;
 
-  // Nodos de contenedor
+  // Nodos por categoría (un rect por rol, no por container)
   for (let i = 0; i < N; i++) {
-    const n = nodes[i];
+    const agg = aggregates[i];
     const p = positions[i];
+    const count = agg.items.length;
     if (isPreview) {
-      // Solo un punto pequeño coloreado
-      svg += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="6" fill="${n.color}" stroke="#fff" stroke-width="0.8" opacity="0.95" />`;
+      // Punto coloreado por rol, sin label en preview
+      svg += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="7" fill="${agg.color}" stroke="#fff" stroke-width="0.8" opacity="0.95" />`;
+      // Pequeño número con el count si > 1
+      if (count > 1) {
+        svg += `<text x="${p.x.toFixed(1)}" y="${(p.y + 3).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="8" font-weight="700">${count}</text>`;
+      }
     } else {
-      const title = String(n.declared ? n.declared.name : n.meta.label) || "?";
-      const sub = String(n.declared ? n.declared.kind : "container");
-      const envTxt = String(n.meta.env || "");
-      const showEnv = envTxt && envTxt !== "global";
-      const dataAttr = n.declared
-        ? `data-action="open-svc" data-service-id="${esc(n.declared.id)}"`
-        : `data-action="open-container" data-container-name="${esc(n.container.name)}"`;
+      const dataAttr = `data-action="open-role" data-role-key="${esc(agg.groupKey)}"`;
       svg += `<g class="topo-node" ${dataAttr} style="cursor:pointer">
-        <rect x="${(p.x - boxW/2).toFixed(1)}" y="${(p.y - boxH/2).toFixed(1)}" width="${boxW}" height="${boxH}" rx="6"
-              fill="${n.color}" stroke="#fff" stroke-width="1.5" opacity="0.96" />
-        ${showEnv ? `<text x="${p.x.toFixed(1)}" y="${(p.y - 12).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="9" opacity="0.85" font-weight="600">${esc(envTxt)}</text>` : ""}
-        <text x="${p.x.toFixed(1)}" y="${(p.y + 2).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">${esc(title.substring(0, 14))}</text>
-        <text x="${p.x.toFixed(1)}" y="${(p.y + 15).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="9" opacity="0.78">${esc(sub)}</text>
+        <rect x="${(p.x - boxW/2).toFixed(1)}" y="${(p.y - boxH/2).toFixed(1)}" width="${boxW}" height="${boxH}" rx="8"
+              fill="${agg.color}" stroke="#fff" stroke-width="1.5" opacity="0.96" />
+        <text x="${p.x.toFixed(1)}" y="${(p.y - 4).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">${esc(agg.label)}</text>
+        <text x="${p.x.toFixed(1)}" y="${(p.y + 14).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="11" opacity="0.9">${count} ${count > 1 ? "nodos" : "nodo"}</text>
       </g>`;
     }
   }
@@ -362,8 +390,8 @@ function renderTopologySVG(nodes, vpsService, vpsMetricsLine, vpsStatus, opts = 
 // Mini-map para la vista Mapa: usa la topología en formato preview con datos
 // reales de docker (si están cargados en vpsDetailCache).
 function renderMiniCityMap(vps, hosted, satellites, status) {
-  const nodes = buildTopologyNodes(vps, hosted);
-  return renderTopologySVG(nodes, vps, "", status, { preview: true });
+  const aggregates = buildRoleAggregates(vps, hosted);
+  return renderTopologySVG(aggregates, vps, "", status, { preview: true });
 }
 
 function renderVpsExpanded(item, health) {
@@ -543,6 +571,7 @@ function renderVpsDetailView() {
   bindDetailHandlers();
   if (detailServiceId) openServiceDrawer(detailServiceId);
   else if (detailContainerName) openContainerDrawer(detailContainerName);
+  else if (detailRoleKey) openRoleDrawer(detailRoleKey);
 }
 
 // Grupos por rol semántico. Orden = orden de render.
@@ -596,19 +625,7 @@ function _serviceKindToRoleGroup(kind, name) {
 }
 
 function renderHostedServicesSection(hostedServices, vpsService, vpsMetricsLine, vpsStatus) {
-  const nodes = buildTopologyNodes(vpsService, hostedServices);
-
-  // Resumen rápido por rol para ayudar al usuario (sin renderizar tarjetas abajo)
-  const byRole = new Map();
-  for (const n of nodes) {
-    const k = n.meta.role;
-    if (!byRole.has(k)) byRole.set(k, 0);
-    byRole.set(k, byRole.get(k) + 1);
-  }
-  const roleChips = CONTAINER_ROLE_GROUPS
-    .filter(g => byRole.has(g.key))
-    .map(g => `<span class="role-chip" style="background:${g.color}1f; color:${g.color}; border:1px solid ${g.color}55">${esc(g.label)} <b>${byRole.get(g.key)}</b></span>`)
-    .join("");
+  const aggregates = buildRoleAggregates(vpsService, hostedServices);
 
   // Estado de la pre-carga
   const detail = vpsDetailCache.get(vpsService.id);
@@ -621,14 +638,14 @@ function renderHostedServicesSection(hostedServices, vpsService, vpsMetricsLine,
   } else if (docker) {
     const all = docker.containers || [];
     const running = all.filter(c => (c.state || "").toLowerCase() === "running").length;
-    dockerNote = `<div class="muted topology-note">${running} contenedor${running !== 1 ? "es" : ""} running · ${all.length} totales</div>`;
+    const totalNodes = aggregates.reduce((n, a) => n + a.items.length, 0);
+    dockerNote = `<div class="muted topology-note">${aggregates.length} categor${aggregates.length === 1 ? "ía" : "ías"} · ${totalNodes} servicio${totalNodes !== 1 ? "s" : ""} · ${running} contenedor${running !== 1 ? "es" : ""} running de ${all.length} totales</div>`;
   }
 
   return `<section class="detail-services">
-    ${renderTopologySVG(nodes, vpsService, vpsMetricsLine, vpsStatus)}
-    <div class="topology-legend">${roleChips}</div>
+    ${renderTopologySVG(aggregates, vpsService, vpsMetricsLine, vpsStatus)}
     ${dockerNote}
-    <div class="topology-hint">Pincha el VPS o cualquier nodo para ver su detalle</div>
+    <div class="topology-hint">Pincha el VPS o una categoría para ver el detalle</div>
   </section>`;
 }
 
@@ -664,6 +681,9 @@ function bindDetailHandlers() {
   });
   document.querySelectorAll('[data-action="open-container"]').forEach(el => {
     el.onclick = (ev) => { ev.stopPropagation(); openContainerDrawer(el.dataset.containerName); };
+  });
+  document.querySelectorAll('[data-action="open-role"]').forEach(el => {
+    el.onclick = (ev) => { ev.stopPropagation(); openRoleDrawer(el.dataset.roleKey); };
   });
 }
 
@@ -782,11 +802,98 @@ function bindDrawerCloseAgain() {
 function closeServiceDrawer() {
   detailServiceId = null;
   detailContainerName = null;
+  detailRoleKey = null;
   const drawer = document.getElementById("svc-drawer");
   if (drawer) {
     drawer.classList.add("hidden");
     drawer.innerHTML = "";
   }
+}
+
+// Drawer de categoría (Fase 8.6): lista los contenedores de un rol,
+// agrupados por env (testing / staging / global). Cada tile abre su
+// propio drawer (container o service) reemplazando este.
+function openRoleDrawer(roleKey) {
+  detailRoleKey = roleKey;
+  detailServiceId = null;
+  detailContainerName = null;
+  const drawer = document.getElementById("svc-drawer");
+  if (!drawer) return;
+  drawer.classList.remove("hidden");
+
+  const item = findVpsItem(detailVpsId);
+  if (!item) { closeServiceDrawer(); return; }
+  const aggregates = buildRoleAggregates(item.vps, item.hostedServices);
+  const role = aggregates.find(r => r.groupKey === roleKey);
+  if (!role) { closeServiceDrawer(); return; }
+
+  // Sub-agrupar por env
+  const byEnv = { testing: [], staging: [], global: [] };
+  for (const it of role.items) {
+    const e = (it.meta && it.meta.env) || "global";
+    (byEnv[e] || byEnv.global).push(it);
+  }
+  let envColsHtml = "";
+  for (const env of ["testing", "staging", "global"]) {
+    const list = byEnv[env];
+    if (list.length === 0) continue;
+    list.sort((a, b) => (a.meta.label || "").localeCompare(b.meta.label || ""));
+    const label = env === "testing" ? "TESTING (prod)" : env === "staging" ? "STAGING" : "GLOBAL";
+    const envCls = env === "testing" ? "env-col-testing" : env === "staging" ? "env-col-staging" : "env-col-global";
+    envColsHtml += `<div class="env-column ${envCls}">
+      <div class="env-column-header">${label} <span class="env-column-count">${list.length}</span></div>
+      <div class="env-column-tiles">
+        ${list.map(it => renderRoleDrawerTile(it, role.color)).join("")}
+      </div>
+    </div>`;
+  }
+
+  drawer.innerHTML = `
+    <div class="drawer-header">
+      <h3>${esc(role.label)} <span class="muted">(${role.items.length} ${role.items.length === 1 ? "servicio" : "servicios"})</span></h3>
+      <button class="drawer-close" id="drawer-close-btn">✕</button>
+    </div>
+    <div class="env-columns">${envColsHtml}</div>`;
+  bindDrawerCloseAgain();
+  // Re-bind tiles dentro del drawer
+  drawer.querySelectorAll('[data-action="open-svc"]').forEach(el => {
+    el.onclick = (ev) => { ev.stopPropagation(); openServiceDrawer(el.dataset.serviceId); };
+  });
+  drawer.querySelectorAll('[data-action="open-container"]').forEach(el => {
+    el.onclick = (ev) => { ev.stopPropagation(); openContainerDrawer(el.dataset.containerName); };
+  });
+}
+
+function renderRoleDrawerTile(item, color) {
+  const { container, meta, declared } = item;
+  const title = String(declared ? declared.name : meta.label) || "?";
+  const subtitle = container
+    ? String((container.image || "").substring(0, 50))
+    : (declared ? `kind: ${declared.kind}` + (declared.config && declared.config.container ? ` · ${declared.config.container}` : "") : "");
+  let envBadge = "";
+  if (meta.env === "testing") envBadge = '<span class="env-badge env-testing">testing</span>';
+  else if (meta.env === "staging") envBadge = '<span class="env-badge env-staging">stg</span>';
+  const declaredChip = declared
+    ? `<span class="container-declared-chip" title="vinculado a service ${esc(declared.kind)}/${esc(declared.name)}">${esc(declared.kind)}</span>`
+    : "";
+  const metric = container && (container.cpu || container.mem)
+    ? `<div class="tile-role muted">CPU ${esc(container.cpu || "-")} · MEM ${esc(container.mem || "-")}</div>`
+    : "";
+  let pill = "";
+  if (container) pill = '<span class="health-pill health-pill-ok">running</span>';
+  else if (declared && declared.config && declared.config.container) pill = '<span class="health-pill health-pill-bad">sin container running</span>';
+  else if (declared) pill = '<span class="health-pill" style="background:rgba(110,118,129,0.2);color:#c9d1d9">declared</span>';
+  const dataAttr = declared
+    ? `data-action="open-svc" data-service-id="${esc(declared.id)}"`
+    : `data-action="open-container" data-container-name="${esc(container.name)}"`;
+  return `
+    <div class="detail-tile" ${dataAttr} style="border-left:4px solid ${color}">
+      <div class="tile-kind">${envBadge} ${declaredChip}</div>
+      <div class="tile-name">${esc(title)}</div>
+      <div class="tile-role muted" title="${esc(subtitle)}">${esc(subtitle)}</div>
+      ${metric}
+      <div style="margin-top:6px">${pill}</div>
+    </div>`;
 }
 
 function renderDrawerError(msg) {
