@@ -15,3 +15,7 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+
+# Metadata por proyecto (Fase 1)
+*.panel.json
+*.linear.token

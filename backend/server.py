@@ -191,11 +191,12 @@ class LinearError(Exception):
     """Error legible para el front al hablar con Linear (sin filtrar el token)."""
 
 
-def linear_query(query: str, variables: dict | None = None, timeout: int = 20) -> dict:
-    """Lanza una consulta GraphQL a Linear con el token guardado (lin_api_…).
-    Devuelve el bloque `data`. Lanza LinearError con un mensaje legible si algo
-    falla. El token nunca se incluye en los mensajes de error."""
-    tok = read_linear_token()
+def linear_query(query: str, variables: dict | None = None, timeout: int = 20,
+                 token: str = "") -> dict:
+    """Lanza una consulta GraphQL a Linear. Si `token` no se pasa, usa el token
+    global (backend/linear.token). Devuelve el bloque `data`. Lanza LinearError
+    con un mensaje legible si algo falla. El token nunca se incluye en errores."""
+    tok = token or read_linear_token()
     if not tok:
         raise LinearError("No hay token de Linear configurado (Perfil → Linear).")
     body = json.dumps({"query": query, "variables": variables or {}}).encode()
@@ -308,6 +309,171 @@ def project_path(c, p, must_exist=True):
 
 def repo_path(c, p, r, must_exist=True):
     return safe_join(c, p, r, must_exist=must_exist)
+
+
+# --------------------------------------------------------------------------- #
+# Metadata por proyecto (Fase 1: servicios, conexiones, token Linear).
+# Cada proyecto guarda dos archivos en projects_dir/<cliente>/<proyecto>/:
+#   .panel.json   → config no-secreta (servicios + conexiones), permisos 600
+#   .linear.token → token de Linear del proyecto, permisos 600 (nunca en API)
+# --------------------------------------------------------------------------- #
+PROJECT_META_NAME = ".panel.json"
+PROJECT_LINEAR_TOKEN_NAME = ".linear.token"
+
+SVC_KINDS = ("vps", "n8n", "docker", "chatwoot", "postgres", "github", "linear", "custom")
+MAX_SERVICES = 100
+MAX_CONNECTIONS = 500
+MAX_NAME_LEN = 100
+MAX_LABEL_LEN = 80
+
+
+def meta_path(c: str, p: str) -> Path | None:
+    """Ruta al .panel.json de un proyecto. Devuelve None si <c>/<p> no es válido
+    o no existe. La validación delega en safe_join (path traversal-safe)."""
+    base = safe_join(c, p)
+    return None if base is None else base / PROJECT_META_NAME
+
+
+def linear_token_path(c: str, p: str) -> Path | None:
+    """Ruta al .linear.token de un proyecto. Misma validación que meta_path."""
+    base = safe_join(c, p)
+    return None if base is None else base / PROJECT_LINEAR_TOKEN_NAME
+
+
+def load_project_meta(c: str, p: str) -> dict:
+    """Lee el .panel.json del proyecto. Si no existe → estado vacío. Si está
+    corrupto → lanza ValueError (el caller debe devolver 500 al cliente)."""
+    mp = meta_path(c, p)
+    if mp is None or not mp.exists():
+        return {"version": 1, "services": [], "connections": []}
+    try:
+        data = json.loads(mp.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{PROJECT_META_NAME} corrupto: {e}")
+    # normaliza por si falta algún campo top-level
+    data.setdefault("version", 1)
+    data.setdefault("services", [])
+    data.setdefault("connections", [])
+    return data
+
+
+def save_project_meta(c: str, p: str, data: dict) -> None:
+    """Escribe el .panel.json con permisos 600. Atomicidad simple: escribe a
+    tmp + rename. Asume que data ya está validada por validate_meta_payload."""
+    mp = meta_path(c, p)
+    if mp is None:
+        raise ValueError("ruta de proyecto inválida")
+    payload = json.dumps(data, indent=2, ensure_ascii=False).encode()
+    tmp = mp.with_suffix(mp.suffix + ".tmp")
+    old = os.umask(0o077)
+    try:
+        tmp.write_bytes(payload)
+        os.chmod(tmp, 0o600)
+        tmp.replace(mp)            # rename atómico en POSIX
+    finally:
+        os.umask(old)
+
+
+def read_project_linear_token(c: str, p: str) -> str:
+    """Lee el token Linear del proyecto. '' si no existe / vacío / ruta inválida."""
+    tp = linear_token_path(c, p)
+    if tp is None:
+        return ""
+    try:
+        return tp.read_text().strip()
+    except FileNotFoundError:
+        return ""
+
+
+def save_project_linear_token(c: str, p: str, tok: str) -> None:
+    """Escribe (o borra) el token Linear del proyecto con permisos 600.
+    Si tok es vacío, borra el archivo (estado «no configurado»)."""
+    tp = linear_token_path(c, p)
+    if tp is None:
+        raise ValueError("ruta de proyecto inválida")
+    if not tok:
+        try:
+            tp.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    old = os.umask(0o077)
+    try:
+        tp.write_text(tok)
+    finally:
+        os.umask(old)
+    os.chmod(tp, 0o600)
+
+
+def _new_id(prefix: str) -> str:
+    """ID corto para servicios/conexiones (4 hex = 16 bits, suficiente para
+    los caps de Fase 1: ≤100 servicios, ≤500 conexiones)."""
+    return f"{prefix}-{secrets.token_hex(2)}"
+
+
+def validate_meta_payload(payload: dict) -> tuple[dict | None, str]:
+    """Valida y normaliza un payload entrante para POST /api/projects/meta.
+    Devuelve (data_normalizada, "") en éxito o (None, "mensaje de error").
+    Asigna ids a servicios/conexiones que no los traen. Detecta colisiones,
+    referencias rotas y caps superados."""
+    if not isinstance(payload, dict):
+        return None, "payload debe ser objeto JSON"
+    services = payload.get("services") or []
+    connections = payload.get("connections") or []
+    if not isinstance(services, list) or not isinstance(connections, list):
+        return None, "services y connections deben ser arrays"
+    if len(services) > MAX_SERVICES:
+        return None, f"máximo {MAX_SERVICES} servicios por proyecto"
+    if len(connections) > MAX_CONNECTIONS:
+        return None, f"máximo {MAX_CONNECTIONS} conexiones por proyecto"
+
+    seen_svc_ids: set[str] = set()
+    out_services: list[dict] = []
+    for i, s in enumerate(services):
+        if not isinstance(s, dict):
+            return None, f"servicio {i}: debe ser objeto"
+        kind = s.get("kind", "")
+        if kind not in SVC_KINDS:
+            return None, f"servicio {i}: kind '{kind}' no válido"
+        name = s.get("name", "")
+        if not isinstance(name, str) or not name.strip():
+            return None, f"servicio {i}: name vacío"
+        if len(name) > MAX_NAME_LEN:
+            return None, f"servicio {i}: name excede {MAX_NAME_LEN} caracteres"
+        cfg = s.get("config")
+        if cfg is not None and not isinstance(cfg, dict):
+            return None, f"servicio {i}: config debe ser objeto o null"
+        sid = s.get("id") or _new_id(kind)
+        if sid in seen_svc_ids:
+            return None, f"servicio {i}: id duplicado '{sid}'"
+        seen_svc_ids.add(sid)
+        out_services.append({
+            "id": sid, "kind": kind, "name": name.strip(),
+            "config": cfg if cfg is not None else {},
+        })
+
+    seen_conn_ids: set[str] = set()
+    out_connections: list[dict] = []
+    for i, ce in enumerate(connections):
+        if not isinstance(ce, dict):
+            return None, f"conexión {i}: debe ser objeto"
+        f, t = ce.get("from", ""), ce.get("to", "")
+        if f not in seen_svc_ids:
+            return None, f"conexión {i}: from '{f}' no es un servicio del proyecto"
+        if t not in seen_svc_ids:
+            return None, f"conexión {i}: to '{t}' no es un servicio del proyecto"
+        label = ce.get("label", "")
+        if not isinstance(label, str):
+            return None, f"conexión {i}: label debe ser string"
+        if len(label) > MAX_LABEL_LEN:
+            return None, f"conexión {i}: label excede {MAX_LABEL_LEN} caracteres"
+        cid = ce.get("id") or _new_id("c")
+        if cid in seen_conn_ids:
+            return None, f"conexión {i}: id duplicado '{cid}'"
+        seen_conn_ids.add(cid)
+        out_connections.append({"id": cid, "from": f, "to": t, "label": label})
+
+    return {"version": 1, "services": out_services, "connections": out_connections}, ""
 
 
 def list_subdirs(base) -> list:
@@ -837,7 +1003,8 @@ class Handler(BaseHTTPRequestHandler):
                 resp["github_token_set"] = bool(CFG.get("github_token"))
                 resp["linear_token_set"] = bool(read_linear_token())
             self._json(200, resp)
-        elif path in ("/api/clients", "/api/projects", "/api/repos", "/api/repos/branches"):
+        elif path in ("/api/clients", "/api/projects", "/api/repos",
+                      "/api/repos/branches", "/api/projects/meta"):
             if not self._is_authed():
                 return self._json(401, {"error": "no autorizado"})
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -847,6 +1014,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._projects_of(q.get("client", [""])[0])
             elif path == "/api/repos":
                 self._repos_of(q.get("client", [""])[0], q.get("project", [""])[0])
+            elif path == "/api/projects/meta":
+                self._proj_meta_get(q.get("client", [""])[0], q.get("project", [""])[0])
             else:
                 self._repo_branches(q.get("client", [""])[0], q.get("project", [""])[0],
                                     q.get("name", [""])[0])
@@ -858,10 +1027,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._mon_hosts()
             else:
                 self._mon_report(q.get("host", [""])[0])
-        elif path in ("/api/linear/issues", "/api/linear/all"):
+        elif path in ("/api/linear/issues", "/api/linear/all",
+                      "/api/projects/linear/issues", "/api/projects/linear/all"):
             if not self._is_authed():
                 return self._json(401, {"error": "no autorizado"})
-            self._linear_issues() if path == "/api/linear/issues" else self._linear_all()
+            if path == "/api/linear/issues":
+                self._linear_issues()
+            elif path == "/api/linear/all":
+                self._linear_all()
+            else:
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                c = q.get("client", [""])[0]
+                p = q.get("project", [""])[0]
+                if path == "/api/projects/linear/issues":
+                    self._proj_linear_issues(c, p)
+                else:
+                    self._proj_linear_all(c, p)
         else:
             self._send(404, b"not found", "text/plain")
 
@@ -890,6 +1071,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/projects/create": self._project_create,
             "/api/projects/delete": self._project_delete,
             "/api/projects/rename": self._project_rename,
+            "/api/projects/meta": self._proj_meta_save,
+            "/api/projects/linear-token": self._proj_linear_token_save,
             "/api/repos/clone": self._repo_clone,
             "/api/repos/pull": self._repo_pull,
             "/api/repos/checkout": self._repo_checkout,
@@ -1087,6 +1270,183 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": False, "error": str(e)})
         self._json(200, {"ok": True, "user": viewer.get("name") or viewer.get("email") or "",
                          "issues": issues})
+
+    # -- proyectos: metadata (Fase 1) -------------------------------------- #
+    def _proj_meta_get(self, c: str, p: str):
+        """Devuelve la metadata del proyecto (servicios + conexiones) y el
+        estado del token Linear. NUNCA devuelve el token en sí."""
+        if not valid_name(c) or not valid_name(p):
+            return self._json(400, {"error": "nombres no válidos"})
+        if safe_join(c, p) is None:
+            return self._json(404, {"error": "proyecto no existe"})
+        try:
+            with project_lock(f"{c}/{p}"):
+                data = load_project_meta(c, p)
+                has_proj = bool(read_project_linear_token(c, p))
+        except ValueError as e:
+            return self._json(500, {"error": str(e)})
+        has_global = bool(read_linear_token())
+        self._json(200, {
+            "services": data.get("services", []),
+            "connections": data.get("connections", []),
+            "linear_status": {
+                "has_project_token": has_proj,
+                "has_global_fallback": has_global,
+            },
+        })
+
+    def _proj_meta_save(self):
+        """Reemplaza la metadata del proyecto entera (servicios + conexiones).
+        Asigna ids a entries nuevas, valida tipos/cap/referencias. NO toca el
+        token Linear (eso va por su endpoint dedicado)."""
+        d = self._read_body()
+        c = str(d.get("client", "")).strip()
+        p = str(d.get("project", "")).strip()
+        if not valid_name(c) or not valid_name(p):
+            return self._json(400, {"error": "nombres no válidos"})
+        if safe_join(c, p) is None:
+            return self._json(404, {"error": "proyecto no existe"})
+        normalized, err = validate_meta_payload(d)
+        if normalized is None:
+            return self._json(400, {"error": err})
+        try:
+            with project_lock(f"{c}/{p}"):
+                save_project_meta(c, p, normalized)
+                has_proj = bool(read_project_linear_token(c, p))
+        except ValueError as e:
+            return self._json(500, {"error": str(e)})
+        print(f"[meta] save {c}/{p}: {len(normalized['services'])} svc, "
+              f"{len(normalized['connections'])} conn")
+        has_global = bool(read_linear_token())
+        self._json(200, {
+            "services": normalized["services"],
+            "connections": normalized["connections"],
+            "linear_status": {
+                "has_project_token": has_proj,
+                "has_global_fallback": has_global,
+            },
+        })
+
+    def _proj_linear_token_save(self):
+        """Guarda (o borra si vacío) el token de Linear del proyecto. Nunca
+        devuelve el token. Permisos 600."""
+        d = self._read_body()
+        c = str(d.get("client", "")).strip()
+        p = str(d.get("project", "")).strip()
+        if not valid_name(c) or not valid_name(p):
+            return self._json(400, {"error": "nombres no válidos"})
+        if safe_join(c, p) is None:
+            return self._json(404, {"error": "proyecto no existe"})
+        tok = str(d.get("token", "")).strip()
+        try:
+            with project_lock(f"{c}/{p}"):
+                save_project_linear_token(c, p, tok)
+        except ValueError as e:
+            return self._json(500, {"error": str(e)})
+        print(f"[linear-token] {'set' if tok else 'cleared'} {c}/{p}")
+        self._json(200, {"ok": True, "set": bool(tok)})
+
+    def _resolve_linear_token(self, c: str, p: str) -> tuple[str, str]:
+        """Devuelve (token, source) donde source ∈ {"project", "global", ""}.
+        Aplica la política de fallback: project > global > ninguno."""
+        proj_tok = read_project_linear_token(c, p)
+        if proj_tok:
+            return proj_tok, "project"
+        glob = read_linear_token()
+        if glob:
+            return glob, "global"
+        return "", ""
+
+    def _proj_linear_issues(self, c: str, p: str):
+        """Versión contextual de _linear_issues: usa el token del proyecto (o
+        fallback al global). Mismo shape de respuesta, más `source`."""
+        if not valid_name(c) or not valid_name(p):
+            return self._json(400, {"error": "nombres no válidos"})
+        if safe_join(c, p) is None:
+            return self._json(404, {"error": "proyecto no existe"})
+        tok, source = self._resolve_linear_token(c, p)
+        if not tok:
+            return self._json(200, {"ok": False,
+                "error": "No hay token de Linear ni en el proyecto ni global.",
+                "source": ""})
+        query = """
+        query Mias {
+          viewer {
+            name
+            email
+            assignedIssues(
+              first: 100
+              orderBy: updatedAt
+              filter: { state: { type: { nin: ["completed", "canceled"] } } }
+            ) {
+              nodes {
+                identifier title url priority priorityLabel updatedAt createdAt
+                state { name type color }
+                assignee { id name displayName }
+                team { key name }
+                project { name }
+                labels { nodes { name color } }
+              }
+            }
+          }
+        }
+        """
+        try:
+            data = linear_query(query, token=tok)
+        except LinearError as e:
+            return self._json(200, {"ok": False, "error": str(e), "source": source})
+        viewer = data.get("viewer") or {}
+        nodes = ((viewer.get("assignedIssues") or {}).get("nodes")) or []
+        issues = [self._li_map(n) for n in nodes]
+        self._json(200, {"ok": True,
+            "user": viewer.get("name") or viewer.get("email") or "",
+            "issues": issues, "source": source})
+
+    def _proj_linear_all(self, c: str, p: str):
+        """Versión contextual de _linear_all (paginada). Mismo shape +
+        `source` indicando si el token usado es del proyecto o global."""
+        if not valid_name(c) or not valid_name(p):
+            return self._json(400, {"error": "nombres no válidos"})
+        if safe_join(c, p) is None:
+            return self._json(404, {"error": "proyecto no existe"})
+        tok, source = self._resolve_linear_token(c, p)
+        if not tok:
+            return self._json(200, {"ok": False,
+                "error": "No hay token de Linear ni en el proyecto ni global.",
+                "source": ""})
+        query = """
+        query Todas($after: String) {
+          viewer { id name email }
+          issues(first: 250, after: $after, orderBy: updatedAt) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              identifier title url priority priorityLabel updatedAt createdAt
+              state { name type color }
+              assignee { id name displayName }
+              team { key name }
+              project { name }
+              labels { nodes { name color } }
+            }
+          }
+        }
+        """
+        issues, after, viewer = [], None, {}
+        try:
+            for _ in range(12):
+                data = linear_query(query, {"after": after}, timeout=30, token=tok)
+                viewer = data.get("viewer") or viewer
+                blk = data.get("issues") or {}
+                vid = viewer.get("id", "")
+                issues.extend(self._li_map(n, vid) for n in (blk.get("nodes") or []))
+                pi = blk.get("pageInfo") or {}
+                if not pi.get("hasNextPage"):
+                    break
+                after = pi.get("endCursor")
+        except LinearError as e:
+            return self._json(200, {"ok": False, "error": str(e), "source": source})
+        self._json(200, {"ok": True,
+            "user": viewer.get("name") or viewer.get("email") or "",
+            "issues": issues, "source": source})
 
     # -- monitorización (VPS remota por SSH) ------------------------------- #
     def _mon_hosts(self):

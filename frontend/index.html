@@ -22,7 +22,7 @@
   <header class="hidden" id="app-header">
     <span class="dot"></span><b>Claude</b>
     <nav id="sections">
-      <button id="tabDev" class="tab active">Desarrollo</button>
+      <button id="tabDev" class="tab active">Proyectos</button>
       <button id="tabMon" class="tab">Monitorización</button>
       <button id="tabLinear" class="tab">Linear</button>
     </nav>
@@ -51,41 +51,83 @@
   </div>
 
   <div id="main-row" class="hidden">
-    <aside id="sidebar">
-      <div class="side-head">
-        <span>Repositorios</span>
-        <button id="cloneBtn" title="Clonar repositorio">+ Clonar</button>
-      </div>
-      <ul id="projList"></ul>
-    </aside>
-
-    <aside id="convo-panel">
-      <div class="side-head">
-        <span>Conversaciones</span>
-        <button id="newConvoBtn" title="Nueva conversación">+ Nueva</button>
-      </div>
-      <ul id="convoList"></ul>
-    </aside>
-
-    <div id="chat-col">
-      <div id="projbar" class="hidden">
-        <button id="convoToggle" title="Mostrar/ocultar conversaciones">☰</button>
-        <span id="crumb" class="crumb"></span>
-        <b id="projName">—</b>
-        <span id="projBranch" class="badge"></span>
-        <span class="spacer"></span>
-        <select id="branchSel" title="Cambiar de rama"></select>
-        <button id="pullBtn">Pull</button>
-        <button id="renameBtn" title="Renombrar repo">✎</button>
-        <button id="delBtn" class="danger">Borrar</button>
-      </div>
-      <div id="log"></div>
-      <footer id="app-footer">
-        <div class="inputrow">
-          <textarea id="input" placeholder="Selecciona un proyecto y escribe…"></textarea>
-          <button class="send" id="sendBtn">Enviar</button>
+    <div class="proj-tabs">
+      <button class="proj-tab active" data-view="repos">Repos</button>
+      <button class="proj-tab" data-view="map">Mapa</button>
+    </div>
+    <div id="repos-area">
+      <aside id="sidebar">
+        <div class="side-head">
+          <span>Repositorios</span>
+          <button id="cloneBtn" title="Clonar repositorio">+ Clonar</button>
         </div>
-      </footer>
+        <ul id="projList"></ul>
+      </aside>
+
+      <aside id="convo-panel">
+        <div class="side-head">
+          <span>Conversaciones</span>
+          <button id="newConvoBtn" title="Nueva conversación">+ Nueva</button>
+        </div>
+        <ul id="convoList"></ul>
+      </aside>
+
+      <div id="chat-col">
+        <div id="projbar" class="hidden">
+          <button id="convoToggle" title="Mostrar/ocultar conversaciones">☰</button>
+          <span id="crumb" class="crumb"></span>
+          <b id="projName">—</b>
+          <span id="projBranch" class="badge"></span>
+          <span class="spacer"></span>
+          <select id="branchSel" title="Cambiar de rama"></select>
+          <button id="pullBtn">Pull</button>
+          <button id="renameBtn" title="Renombrar repo">✎</button>
+          <button id="delBtn" class="danger">Borrar</button>
+        </div>
+        <div id="log"></div>
+        <footer id="app-footer">
+          <div class="inputrow">
+            <textarea id="input" placeholder="Selecciona un proyecto y escribe…"></textarea>
+            <button class="send" id="sendBtn">Enviar</button>
+          </div>
+        </footer>
+      </div>
+    </div>
+    <div id="map-area" class="hidden">
+      <div class="map-editor">
+
+        <section class="map-block">
+          <h3>Linear del proyecto</h3>
+          <div class="map-linear-status">
+            <span id="mapLinearBadge" class="badge muted">no configurado</span>
+            <span id="mapLinearFallback" class="meta hidden">usando token global (fallback)</span>
+          </div>
+          <div class="map-actions">
+            <button id="mapLinearSet" class="btn">Configurar token</button>
+            <button id="mapLinearDel" class="btn danger hidden">Borrar token</button>
+          </div>
+        </section>
+
+        <section class="map-block">
+          <h3>Servicios (zonas)</h3>
+          <div class="map-actions"><button id="mapSvcAdd" class="btn">+ Añadir servicio</button></div>
+          <ul id="mapSvcList" class="map-list"></ul>
+          <div id="mapSvcEmpty" class="map-empty">Sin servicios todavía.</div>
+        </section>
+
+        <section class="map-block">
+          <h3>Conexiones (cables)</h3>
+          <div class="map-actions"><button id="mapConnAdd" class="btn">+ Añadir conexión</button></div>
+          <ul id="mapConnList" class="map-list"></ul>
+          <div id="mapConnEmpty" class="map-empty">Sin conexiones todavía.</div>
+        </section>
+
+        <div class="map-savebar">
+          <span id="mapDirtyHint" class="meta hidden">Cambios sin guardar</span>
+          <button id="mapSave" class="btn primary" disabled>Guardar cambios</button>
+        </div>
+
+      </div>
     </div>
   </div>
 
@@ -129,6 +171,7 @@
 
   <!-- Vista: Linear (todas las issues) -->
   <div id="linear-view" class="hidden">
+    <h2 id="linearTitle">Linear</h2>
     <div class="lin-bar">
       <input id="linQ" type="search" placeholder="Buscar (id o título)…" class="lin-search">
       <select id="linProject" title="Proyecto"><option value="">Todos los proyectos</option></select>
@@ -239,6 +282,68 @@
       <div class="err" id="linearMsg"></div>
 
       <button id="cancelPwBtn" class="secondary">Cerrar</button>
+    </div>
+  </div>
+
+  <!-- Modales del editor Mapa (Fase 1) -->
+  <div id="svcModal" class="modal hidden">
+    <div class="modal-card">
+      <h3 id="svcModalTitle">Añadir servicio</h3>
+      <label>Tipo
+        <select id="svcModalKind">
+          <option value="vps">vps</option>
+          <option value="n8n">n8n</option>
+          <option value="docker">docker</option>
+          <option value="chatwoot">chatwoot</option>
+          <option value="postgres">postgres</option>
+          <option value="github">github</option>
+          <option value="linear">linear</option>
+          <option value="custom">custom</option>
+        </select>
+      </label>
+      <label>Nombre
+        <input id="svcModalName" type="text" maxlength="100" placeholder="P. ej. VPS principal">
+      </label>
+      <label>Config (JSON)
+        <textarea id="svcModalConfig" rows="6" placeholder='{"host":"1.2.3.4","user":"ubuntu"}'></textarea>
+      </label>
+      <div class="modal-err" id="svcModalErr"></div>
+      <div class="modal-actions">
+        <button id="svcModalCancel" class="btn">Cancelar</button>
+        <button id="svcModalSave" class="btn primary">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="connModal" class="modal hidden">
+    <div class="modal-card">
+      <h3 id="connModalTitle">Añadir conexión</h3>
+      <label>Desde <select id="connModalFrom"></select></label>
+      <label>Hasta <select id="connModalTo"></select></label>
+      <label>Etiqueta (opcional)
+        <input id="connModalLabel" type="text" maxlength="80" placeholder="host, webhooks, queries...">
+      </label>
+      <div class="modal-err" id="connModalErr"></div>
+      <div class="modal-actions">
+        <button id="connModalCancel" class="btn">Cancelar</button>
+        <button id="connModalSave" class="btn primary">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="linTokenModal" class="modal hidden">
+    <div class="modal-card">
+      <h3>Token de Linear del proyecto</h3>
+      <p class="modal-help">Pega un API key personal de Linear (empieza por <code>lin_api_</code>).
+        Nunca se devuelve al navegador.</p>
+      <label>Token
+        <input id="linTokenInput" type="password" placeholder="lin_api_..." autocomplete="off">
+      </label>
+      <div class="modal-err" id="linTokenErr"></div>
+      <div class="modal-actions">
+        <button id="linTokenCancel" class="btn">Cancelar</button>
+        <button id="linTokenSave" class="btn primary">Guardar</button>
+      </div>
     </div>
   </div>
 

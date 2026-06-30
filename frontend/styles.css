@@ -110,7 +110,7 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
 .card-item h3 { padding-right: 44px; }
 .grid-empty { color: var(--muted); grid-column: 1/-1; padding: 8px; }
 
-/* pestañas de sección (Desarrollo / Monitorización) */
+/* pestañas de sección (Proyectos / Monitorización) */
 #sections { display: flex; gap: 4px; margin-left: 6px; }
 .tab { background: transparent; border: 1px solid transparent; color: var(--muted);
        border-radius: 6px; padding: 5px 10px; cursor: pointer; font-size: 13px; }
@@ -330,3 +330,62 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
 .lin-prio.p1 { color: #f85149; border-color: #f85149; }   /* Urgent */
 .lin-prio.p2 { color: #f0883e; border-color: #5a3a25; }   /* High */
 .lin-prio.p3 { color: #d29922; }                          /* Medium */
+
+/* sub-pestañas dentro de un Proyecto (Fase 1: Repos vs Mapa) */
+.proj-tabs { display: flex; gap: 4px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--bg); }
+.proj-tab { background: transparent; border: 1px solid transparent; color: var(--muted);
+            border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 13px; }
+.proj-tab:hover { color: var(--text); }
+.proj-tab.active { color: var(--text); background: var(--tool); border-color: var(--border); }
+
+/* Editor "Mapa" (Fase 1) */
+.map-editor { padding: 16px; max-width: 920px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+.map-block { background: var(--tool); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+.map-block h3 { margin: 0 0 10px 0; font-size: 14px; color: var(--text); }
+.map-actions { display: flex; gap: 8px; margin-bottom: 8px; }
+.map-list { list-style: none; padding: 0; margin: 6px 0 0 0; display: flex; flex-direction: column; gap: 4px; }
+.map-empty { color: var(--muted); font-size: 12px; padding: 4px 0; }
+.map-linear-status { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.map-savebar { display: flex; gap: 12px; align-items: center; justify-content: flex-end; padding: 8px 0; border-top: 1px solid var(--border); }
+.map-savebar .meta { color: var(--muted); font-size: 12px; }
+
+/* Filas de servicio y conexión */
+.svc-row, .conn-row { display: flex; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 6px; }
+.svc-row:hover, .conn-row:hover { background: var(--bg); }
+.svc-kind-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; background: var(--bg);
+                  color: var(--muted); font-size: 11px; font-family: monospace; min-width: 64px; text-align: center; }
+.svc-name, .conn-text { flex: 1; color: var(--text); font-size: 13px; }
+.svc-cfg, .conn-label { color: var(--muted); font-size: 12px; font-family: monospace; }
+.row-actions { display: flex; gap: 4px; }
+.btn-mini { background: transparent; border: 1px solid var(--border); color: var(--muted);
+            border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 12px; }
+.btn-mini:hover { color: var(--text); }
+.btn-mini.danger:hover { color: #ef4444; border-color: #ef4444; }
+
+/* Badges genéricos reutilizables */
+.badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px;
+         border: 1px solid var(--border); }
+.badge.muted { color: var(--muted); }
+.badge.ok { color: #22c55e; border-color: #22c55e; }
+
+/* Modales (Fase 1: comparten estilo, sencillos) */
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex;
+         align-items: center; justify-content: center; z-index: 1000; }
+.modal.hidden { display: none; }
+.modal-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+              padding: 20px; min-width: 360px; max-width: 520px; width: 90%;
+              display: flex; flex-direction: column; gap: 10px; }
+.modal-card h3 { margin: 0 0 6px 0; font-size: 15px; }
+.modal-card label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.modal-card input[type="text"], .modal-card input[type="password"],
+.modal-card select, .modal-card textarea {
+  background: var(--tool); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 8px; font-size: 13px; font-family: inherit;
+}
+.modal-card textarea { font-family: monospace; resize: vertical; }
+.modal-help { color: var(--muted); font-size: 12px; margin: 0; }
+.modal-err { color: #ef4444; font-size: 12px; min-height: 16px; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
+
+/* Cabecera contextual de Linear (Fase 1) */
+#linearTitle { margin: 0 0 10px 0; font-size: 14px; }

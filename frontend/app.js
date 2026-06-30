@@ -214,6 +214,306 @@ $("#crumb").addEventListener("click", e => {
   else if (nav === "projects") { current = null; loadProjects(); showDev("projects"); }
 });
 
+// --------------------------------------------------------------------------- //
+// Editor "Mapa" (Fase 1): formulario para servicios + conexiones + token Linear.
+// El 3D llegará en Fase 3; aquí solo capturamos y persistimos la metadata.
+// --------------------------------------------------------------------------- //
+const SVC_KINDS = ["vps", "n8n", "docker", "chatwoot", "postgres", "github", "linear", "custom"];
+let mapState = { services: [], connections: [], linear_status: { has_project_token: false, has_global_fallback: false } };
+let mapLoaded = false;
+let mapDirtyBaseline = "";  // JSON.stringify del state cargado desde server
+
+function projTabSet(view) {
+  document.querySelectorAll(".proj-tab").forEach(b => b.classList.toggle("active", b.dataset.view === view));
+  $("#repos-area").classList.toggle("hidden", view !== "repos");
+  $("#map-area").classList.toggle("hidden", view !== "map");
+  if (view === "map") enterMapTab();
+}
+
+document.querySelectorAll(".proj-tab").forEach(b => b.onclick = () => projTabSet(b.dataset.view));
+
+function mapKey() { return `${selClient}/${selProject}`; }
+
+async function loadMeta(client, project) {
+  try {
+    const r = await fetch(`/api/projects/meta?client=${encodeURIComponent(client)}&project=${encodeURIComponent(project)}`);
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "error"); }
+    const data = await r.json();
+    mapState = {
+      services: data.services || [],
+      connections: data.connections || [],
+      linear_status: data.linear_status || { has_project_token: false, has_global_fallback: false },
+    };
+    mapDirtyBaseline = JSON.stringify({ services: mapState.services, connections: mapState.connections });
+    mapLoaded = true;
+    renderMap();
+    updateDirty();
+  } catch (e) {
+    mapState = { services: [], connections: [], linear_status: { has_project_token: false, has_global_fallback: false } };
+    mapDirtyBaseline = "";
+    mapLoaded = false;
+    renderMap();
+    alert("No se pudo cargar la metadata: " + e.message);
+  }
+}
+
+async function enterMapTab() {
+  if (!selClient || !selProject) return;
+  await loadMeta(selClient, selProject);
+}
+
+function renderMap() {
+  // Linear
+  const ls = mapState.linear_status;
+  const badge = $("#mapLinearBadge");
+  badge.textContent = ls.has_project_token ? "configurado ✓" : "no configurado";
+  badge.classList.toggle("ok", ls.has_project_token);
+  badge.classList.toggle("muted", !ls.has_project_token);
+  $("#mapLinearFallback").classList.toggle("hidden",
+    ls.has_project_token || !ls.has_global_fallback);
+  $("#mapLinearDel").classList.toggle("hidden", !ls.has_project_token);
+
+  // Servicios
+  const sList = $("#mapSvcList");
+  sList.innerHTML = "";
+  $("#mapSvcEmpty").classList.toggle("hidden", mapState.services.length > 0);
+  for (const s of mapState.services) {
+    const li = document.createElement("li"); li.className = "svc-row";
+    const cfgPreview = Object.keys(s.config || {}).length
+      ? Object.entries(s.config).slice(0, 3).map(([k,v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`).join(" · ")
+      : "—";
+    li.innerHTML = `
+      <span class="svc-kind-badge">${esc(s.kind)}</span>
+      <span class="svc-name">${esc(s.name)}</span>
+      <span class="svc-cfg">${esc(cfgPreview)}</span>
+      <span class="row-actions">
+        <button class="btn-mini" data-act="edit" data-id="${esc(s.id)}">Editar</button>
+        <button class="btn-mini danger" data-act="del" data-id="${esc(s.id)}">Borrar</button>
+      </span>`;
+    sList.appendChild(li);
+  }
+  sList.querySelectorAll("button[data-act]").forEach(b => {
+    b.onclick = () => b.dataset.act === "edit" ? openSvcModal(b.dataset.id) : deleteSvc(b.dataset.id);
+  });
+
+  // Conexiones
+  const cList = $("#mapConnList");
+  cList.innerHTML = "";
+  $("#mapConnEmpty").classList.toggle("hidden", mapState.connections.length > 0);
+  const nameById = id => (mapState.services.find(x => x.id === id) || {}).name || id;
+  for (const c of mapState.connections) {
+    const li = document.createElement("li"); li.className = "conn-row";
+    const lbl = c.label ? ` <span class="conn-label">(${esc(c.label)})</span>` : "";
+    li.innerHTML = `
+      <span class="conn-text">${esc(nameById(c.from))} → ${esc(nameById(c.to))}${lbl}</span>
+      <span class="row-actions">
+        <button class="btn-mini danger" data-conn="${esc(c.id)}">Borrar</button>
+      </span>`;
+    cList.appendChild(li);
+  }
+  cList.querySelectorAll("button[data-conn]").forEach(b => {
+    b.onclick = () => deleteConn(b.dataset.conn);
+  });
+}
+
+function updateDirty() {
+  const now = JSON.stringify({ services: mapState.services, connections: mapState.connections });
+  const dirty = mapLoaded && now !== mapDirtyBaseline;
+  $("#mapSave").disabled = !dirty;
+  $("#mapDirtyHint").classList.toggle("hidden", !dirty);
+}
+
+// ---- modal de servicio (añadir / editar / borrar) ----------------------- //
+let svcModalEditingId = null;  // null si añadiendo, id si editando
+
+function openSvcModal(id) {
+  svcModalEditingId = id || null;
+  const svc = id ? mapState.services.find(x => x.id === id) : null;
+  $("#svcModalTitle").textContent = svc ? "Editar servicio" : "Añadir servicio";
+  $("#svcModalKind").value = svc ? svc.kind : "vps";
+  $("#svcModalKind").disabled = !!svc;            // kind inmutable tras crear
+  $("#svcModalName").value = svc ? svc.name : "";
+  $("#svcModalConfig").value = svc ? JSON.stringify(svc.config || {}, null, 2) : "{}";
+  $("#svcModalErr").textContent = "";
+  $("#svcModal").classList.remove("hidden");
+  $("#svcModalName").focus();
+}
+
+function closeSvcModal() {
+  $("#svcModal").classList.add("hidden");
+  svcModalEditingId = null;
+}
+
+function saveSvcFromModal() {
+  const kind = $("#svcModalKind").value;
+  const name = $("#svcModalName").value.trim();
+  const cfgRaw = $("#svcModalConfig").value.trim() || "{}";
+  if (!SVC_KINDS.includes(kind)) { $("#svcModalErr").textContent = "Tipo no válido."; return; }
+  if (!name) { $("#svcModalErr").textContent = "El nombre es obligatorio."; return; }
+  if (name.length > 100) { $("#svcModalErr").textContent = "Nombre demasiado largo (máx 100)."; return; }
+  let cfg;
+  try { cfg = JSON.parse(cfgRaw); }
+  catch (e) { $("#svcModalErr").textContent = "Config debe ser JSON válido: " + e.message; return; }
+  if (cfg === null) cfg = {};
+  if (typeof cfg !== "object" || Array.isArray(cfg)) {
+    $("#svcModalErr").textContent = "Config debe ser un objeto JSON."; return;
+  }
+  if (svcModalEditingId) {
+    const i = mapState.services.findIndex(x => x.id === svcModalEditingId);
+    if (i >= 0) mapState.services[i] = { ...mapState.services[i], name, config: cfg };
+  } else {
+    mapState.services.push({ id: "", kind, name, config: cfg });  // id lo asigna el backend
+  }
+  closeSvcModal();
+  renderMap();
+  updateDirty();
+}
+
+function deleteSvc(id) {
+  const svc = mapState.services.find(x => x.id === id);
+  if (!svc) return;
+  if (!confirm(`Borrar servicio "${svc.name}"?\nTambién se borrarán las conexiones que lo referencian.`)) return;
+  mapState.services = mapState.services.filter(x => x.id !== id);
+  // Limpieza de conexiones huérfanas (evita 400 del backend al guardar)
+  mapState.connections = mapState.connections.filter(c => c.from !== id && c.to !== id);
+  renderMap();
+  updateDirty();
+}
+
+$("#mapSvcAdd").onclick = () => openSvcModal(null);
+$("#svcModalCancel").onclick = closeSvcModal;
+$("#svcModalSave").onclick = saveSvcFromModal;
+
+// ---- modal de conexión -------------------------------------------------- //
+let connModalEditingId = null;  // siempre null en Fase 1 (sin edit de conexión, solo add/delete)
+
+function openConnModal() {
+  connModalEditingId = null;
+  if (mapState.services.length < 2) {
+    alert("Necesitas al menos 2 servicios para crear una conexión.");
+    return;
+  }
+  const fromSel = $("#connModalFrom"); fromSel.innerHTML = "";
+  const toSel = $("#connModalTo"); toSel.innerHTML = "";
+  for (const s of mapState.services) {
+    const optF = document.createElement("option"); optF.value = s.id; optF.textContent = `${s.name} [${s.kind}]`; fromSel.appendChild(optF);
+    const optT = document.createElement("option"); optT.value = s.id; optT.textContent = `${s.name} [${s.kind}]`; toSel.appendChild(optT);
+  }
+  toSel.selectedIndex = Math.min(1, toSel.options.length - 1);
+  $("#connModalLabel").value = "";
+  $("#connModalErr").textContent = "";
+  $("#connModal").classList.remove("hidden");
+}
+
+function closeConnModal() { $("#connModal").classList.add("hidden"); }
+
+function saveConnFromModal() {
+  const from = $("#connModalFrom").value;
+  const to = $("#connModalTo").value;
+  const label = $("#connModalLabel").value.trim();
+  if (!from || !to) { $("#connModalErr").textContent = "Selecciona ambos extremos."; return; }
+  if (from === to) { $("#connModalErr").textContent = "El origen y el destino no pueden ser el mismo servicio."; return; }
+  if (label.length > 80) { $("#connModalErr").textContent = "Etiqueta demasiado larga (máx 80)."; return; }
+  mapState.connections.push({ id: "", from, to, label });
+  closeConnModal();
+  renderMap();
+  updateDirty();
+}
+
+function deleteConn(id) {
+  const c = mapState.connections.find(x => x.id === id);
+  if (!c) return;
+  if (!confirm("Borrar conexión?")) return;
+  mapState.connections = mapState.connections.filter(x => x.id !== id);
+  renderMap();
+  updateDirty();
+}
+
+$("#mapConnAdd").onclick = openConnModal;
+$("#connModalCancel").onclick = closeConnModal;
+$("#connModalSave").onclick = saveConnFromModal;
+
+// ---- modal de token Linear --------------------------------------------- //
+function openLinTokenModal() {
+  $("#linTokenInput").value = "";
+  $("#linTokenErr").textContent = "";
+  $("#linTokenModal").classList.remove("hidden");
+  $("#linTokenInput").focus();
+}
+
+function closeLinTokenModal() { $("#linTokenModal").classList.add("hidden"); }
+
+async function saveLinTokenFromModal() {
+  const tok = $("#linTokenInput").value.trim();
+  if (!tok) { $("#linTokenErr").textContent = "Token vacío. Para borrarlo usa el botón 'Borrar token'."; return; }
+  try {
+    const r = await fetch("/api/projects/linear-token", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({client: selClient, project: selProject, token: tok}),
+    });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "error"); }
+    closeLinTokenModal();
+    // refresca solo el linear_status sin tocar el resto del estado
+    mapState.linear_status.has_project_token = true;
+    renderMap();
+  } catch (e) {
+    $("#linTokenErr").textContent = "No se pudo guardar: " + e.message;
+  }
+}
+
+async function deleteLinToken() {
+  if (!confirm("¿Borrar el token de Linear del proyecto? Pasarás a usar el global (si existe).")) return;
+  try {
+    const r = await fetch("/api/projects/linear-token", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({client: selClient, project: selProject, token: ""}),
+    });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "error"); }
+    mapState.linear_status.has_project_token = false;
+    renderMap();
+  } catch (e) {
+    alert("No se pudo borrar: " + e.message);
+  }
+}
+
+$("#mapLinearSet").onclick = openLinTokenModal;
+$("#mapLinearDel").onclick = deleteLinToken;
+$("#linTokenCancel").onclick = closeLinTokenModal;
+$("#linTokenSave").onclick = saveLinTokenFromModal;
+
+// ---- Guardar metadata completa ----------------------------------------- //
+async function saveMap() {
+  if (!selClient || !selProject) return;
+  $("#mapSave").disabled = true;
+  $("#mapDirtyHint").textContent = "Guardando...";
+  try {
+    const r = await fetch("/api/projects/meta", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        client: selClient,
+        project: selProject,
+        services: mapState.services,
+        connections: mapState.connections,
+      }),
+    });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "error"); }
+    const data = await r.json();
+    mapState.services = data.services || [];
+    mapState.connections = data.connections || [];
+    mapState.linear_status = data.linear_status || mapState.linear_status;
+    mapDirtyBaseline = JSON.stringify({ services: mapState.services, connections: mapState.connections });
+    renderMap();
+    updateDirty();
+    $("#mapDirtyHint").textContent = "";
+  } catch (e) {
+    alert("No se pudo guardar: " + e.message);
+    $("#mapDirtyHint").textContent = "Cambios sin guardar";
+    updateDirty();    // re-habilita el botón si seguía dirty
+  }
+}
+
+$("#mapSave").onclick = saveMap;
+
 // ---- repos (workspace de desarrollo) ----
 function enterReposView() {
   $("#projbar").classList.remove("hidden");
@@ -760,17 +1060,37 @@ $("#mhDelBtn").onclick = async () => {
 
 // ---- Linear (todas las issues) -------------------------------------------- //
 let linearLoaded = false, linIssues = [], linUser = "", linMine = false;
+let linearCtx = "";   // Fase 1: "proj:<cliente>/<proyecto>" o "global"; fuerza refetch si cambia
 // orden de los grupos por tipo de estado (lo "en curso" arriba)
 const LINEAR_ORDER = { started: 0, unstarted: 1, backlog: 2, triage: 3, completed: 4, canceled: 5, "": 6 };
 
+function _linearInProject() {
+  return !!(selClient && selProject && devScreen === "repos");
+}
+function _updateLinearTitle() {
+  const titleEl = $("#linearTitle");
+  if (!titleEl) return;
+  titleEl.textContent = _linearInProject()
+    ? `Linear de ${selClient} / ${selProject}`
+    : "Linear (global)";
+}
+
 async function linearEnter() {
+  // si el contexto cambió (sin proyecto ↔ proyecto, o de un proyecto a otro), recarga
+  const ctx = _linearInProject() ? `proj:${selClient}/${selProject}` : "global";
+  if (ctx !== linearCtx) { linearLoaded = false; linearCtx = ctx; }
+  _updateLinearTitle();
   if (!linearLoaded) await linearFetch();
 }
 async function linearFetch() {
   const meta = $("#linearMeta"), empty = $("#linearEmpty"), groups = $("#linearGroups");
   meta.textContent = "cargando…"; empty.classList.add("hidden");
+  const inProject = _linearInProject();
+  const url = inProject
+    ? `/api/projects/linear/all?client=${encodeURIComponent(selClient)}&project=${encodeURIComponent(selProject)}`
+    : "/api/linear/all";
   let j;
-  try { j = await (await fetch("/api/linear/all")).json(); }
+  try { j = await (await fetch(url)).json(); }
   catch (e) { meta.textContent = ""; empty.classList.remove("hidden"); empty.textContent = "Error de conexión."; return; }
   meta.textContent = "";
   if (!j.ok) {
@@ -784,6 +1104,10 @@ async function linearFetch() {
   linUser = j.user || "";
   linIssues = j.issues || [];
   $("#linearUser").textContent = linUser;
+  // aviso de fallback: usando token global aunque hay proyecto activo
+  if (inProject && j.source === "global") {
+    meta.textContent = "usando token global (fallback)";
+  }
   linPopulateFilters();
   linRender();
 }
