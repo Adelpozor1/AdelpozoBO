@@ -24,6 +24,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import struct
 import subprocess
@@ -420,6 +421,94 @@ def save_project_linear_token(c: str, p: str, tok: str) -> None:
     os.chmod(tp, 0o600)
 
 
+def alerts_path(c: str, p: str) -> Path | None:
+    """Ruta al .alerts.json del proyecto. Misma validación que meta_path."""
+    base = safe_join(c, p)
+    return None if base is None else base / ".alerts.json"
+
+
+def load_alerts(c: str, p: str) -> dict:
+    """Carga .alerts.json del proyecto. Estructura por defecto si no existe."""
+    ap = alerts_path(c, p)
+    default = {"version": 1, "rules": []}
+    if ap is None or not ap.exists():
+        return default
+    try:
+        data = json.loads(ap.read_text())
+    except (json.JSONDecodeError, OSError):
+        return default
+    if not isinstance(data, dict):
+        return default
+    if not isinstance(data.get("rules"), list):
+        data["rules"] = []
+    data.setdefault("version", 1)
+    return data
+
+
+def save_alerts(c: str, p: str, data: dict) -> None:
+    """Persiste .alerts.json con permisos 600."""
+    ap = alerts_path(c, p)
+    if ap is None:
+        raise ValueError("ruta de proyecto inválida")
+    payload = json.dumps(data, ensure_ascii=False, indent=2).encode()
+    tmp = ap.with_suffix(ap.suffix + ".tmp")
+    old = os.umask(0o077)
+    try:
+        tmp.write_bytes(payload)
+        os.chmod(tmp, 0o600)
+        tmp.replace(ap)
+    finally:
+        os.umask(old)
+
+
+ALERT_KINDS = {"cpu_above", "ram_above", "disk_above",
+               "container_down", "n8n_workflow_failed", "health_url_not_2xx"}
+
+
+def validate_alerts_payload(payload: dict) -> tuple[dict | None, str]:
+    """Valida la estructura de un .alerts.json entrante. Retorna (normalizado, error)."""
+    if not isinstance(payload, dict):
+        return None, "payload no es objeto"
+    rules_in = payload.get("rules", [])
+    if not isinstance(rules_in, list):
+        return None, "rules debe ser lista"
+    out_rules = []
+    seen_ids = set()
+    for i, r in enumerate(rules_in):
+        if not isinstance(r, dict):
+            return None, f"rule[{i}] no es objeto"
+        rid = (r.get("id") or "").strip() or _new_id("alr")
+        if rid in seen_ids:
+            return None, f"rule[{i}]: id duplicado '{rid}'"
+        seen_ids.add(rid)
+        svc = (r.get("service_id") or "").strip()
+        kind = (r.get("kind") or "").strip()
+        if not svc:
+            return None, f"rule[{i}].service_id requerido"
+        if kind not in ALERT_KINDS:
+            return None, f"rule[{i}].kind '{kind}' inválido"
+        threshold = r.get("threshold")
+        if kind in ("cpu_above", "ram_above", "disk_above"):
+            try:
+                threshold = float(threshold)
+            except (TypeError, ValueError):
+                return None, f"rule[{i}].threshold numérico requerido para {kind}"
+            if not (0 <= threshold <= 100):
+                return None, f"rule[{i}].threshold debe estar entre 0 y 100"
+        else:
+            threshold = None
+        label = (r.get("label") or "").strip()[:120] or None
+        out_rules.append({
+            "id": rid,
+            "service_id": svc,
+            "kind": kind,
+            "threshold": threshold,
+            "enabled": bool(r.get("enabled", True)),
+            "label": label,
+        })
+    return {"version": 1, "rules": out_rules}, ""
+
+
 def _new_id(prefix: str) -> str:
     """ID corto para servicios/conexiones (4 hex = 16 bits, suficiente para
     los caps de Fase 1: ≤100 servicios, ≤500 conexiones)."""
@@ -534,6 +623,8 @@ def validate_meta_payload(payload: dict) -> tuple[dict | None, str]:
     # Validación cruzada Fase 6: on_host y satellites_of deben referenciar
     # un id de service con kind=vps presente en el mismo payload
     vps_ids = {s["id"] for s in out_services if s["kind"] == "vps"}
+    # Fase 8 — role / container / health_url opcionales por service
+    ROLES_OK = {"db", "backoffice", "n8n", "chatwoot", "app", "other"}
     for i, s in enumerate(out_services):
         cfg = s.get("config", {})
         if not isinstance(cfg, dict):
@@ -544,9 +635,25 @@ def validate_meta_payload(payload: dict) -> tuple[dict | None, str]:
         if "satellites_of" in cfg:
             if not isinstance(cfg["satellites_of"], str) or cfg["satellites_of"] not in vps_ids:
                 return None, f"servicio {i}: satellites_of '{cfg.get('satellites_of')}' no es una VPS del proyecto"
+        if "role" in cfg:
+            r = cfg["role"]
+            if not isinstance(r, str) or r not in ROLES_OK:
+                return None, f"servicio {i}: role '{r}' no válido"
+        if "container" in cfg:
+            c = cfg["container"]
+            if not isinstance(c, str) or len(c) > 200:
+                return None, f"servicio {i}: container inválido"
+            cfg["container"] = c.strip()
+        if "health_url" in cfg:
+            u = cfg["health_url"]
+            if not isinstance(u, str) or len(u) > 200:
+                return None, f"servicio {i}: health_url inválido"
+            if u and not (u.startswith("http://") or u.startswith("https://")):
+                return None, f"servicio {i}: health_url debe empezar por http(s)://"
+            cfg["health_url"] = u.strip()
 
     return {
-        "version": 4,
+        "version": 5,
         "world_position": world_position,
         "services": out_services,
         "connections": out_connections,
@@ -1061,7 +1168,8 @@ def check_vps_health(vps_service: dict) -> dict:
 
 def health_poll_loop():
     """Daemon thread que cada HEALTH_POLL_INTERVAL segundos chequea todas las
-    VPSs declaradas en cualquier proyecto y actualiza HEALTH_CACHE."""
+    VPSs declaradas en cualquier proyecto y actualiza HEALTH_CACHE. Tras cada
+    pasada, evalúa las reglas de alerta (Fase 8) sobre el estado actual."""
     print(f"[health-poll] daemon iniciado (intervalo {HEALTH_POLL_INTERVAL}s)")
     while True:
         try:
@@ -1083,7 +1191,532 @@ def health_poll_loop():
                             HEALTH_CACHE[s["id"]] = entry
         except Exception as e:
             print(f"[health-poll] error: {e}")
+        try:
+            evaluate_alerts()
+        except Exception as e:
+            print(f"[health-poll] eval alerts error: {e}")
         time.sleep(HEALTH_POLL_INTERVAL)
+
+
+# ============================================================ #
+# Fase 8 — Detalle por servicio (probes específicos por kind)   #
+# ============================================================ #
+DETAIL_CACHE = {}              # service_id → {"ts", "data": <response>}
+DETAIL_LOCK = threading.Lock()
+DETAIL_TTL = 15                # segundos
+DETAIL_TIMEOUT = 20            # SSH timeout por probe
+LOGS_TAIL = 200                # líneas de docker logs
+SCHEMA_TABLE_CAP = 200
+SCHEMA_COLUMN_CAP = 2000
+
+
+def _b64(s) -> str:
+    return base64.b64encode(str(s or "").encode()).decode()
+
+
+def _build_host_from_vps(vps_service: dict) -> dict:
+    """Construye dict host para ssh_run a partir de un service kind=vps."""
+    cfg = vps_service.get("config") or {}
+    return {
+        "id": vps_service["id"],
+        "name": vps_service["name"],
+        "ssh_host": cfg.get("host", ""),
+        "ssh_user": cfg.get("user", ""),
+        "ssh_port": cfg.get("port", 22),
+        "identity_file": cfg.get("ssh_key", ""),
+        "db_container": "", "n8n_container": "",
+        "db_user": "postgres", "db_name": "", "db_password": "", "n8n_url": "",
+    }
+
+
+def _find_service(meta: dict, service_id: str) -> dict | None:
+    for s in meta.get("services", []) or []:
+        if s.get("id") == service_id:
+            return s
+    return None
+
+
+def _find_host_vps(meta: dict, service: dict) -> dict | None:
+    """Devuelve el service kind=vps que aloja a `service` (o el propio si es vps)."""
+    if service.get("kind") == "vps":
+        return service
+    on_host = (service.get("config") or {}).get("on_host")
+    if not on_host:
+        return None
+    for s in meta.get("services", []) or []:
+        if s.get("id") == on_host and s.get("kind") == "vps":
+            return s
+    return None
+
+
+def _find_db_service(meta: dict, vps_id: str) -> dict | None:
+    """Busca el primer service kind=postgres alojado en la misma VPS."""
+    for s in meta.get("services", []) or []:
+        if s.get("kind") == "postgres" and (s.get("config") or {}).get("on_host") == vps_id:
+            return s
+    return None
+
+
+def probe_vps(vps_service: dict) -> dict:
+    host = _build_host_from_vps(vps_service)
+    if not host["ssh_host"] or not host["ssh_user"]:
+        return {"error": "ssh_host/ssh_user no configurados", "data": None}
+    code, raw, err = ssh_run(host, build_collector(host), timeout=DETAIL_TIMEOUT)
+    if code != 0:
+        return {"error": (err or "").strip()[:300] or f"ssh exit {code}", "data": None}
+    return {"error": None, "data": parse_report(raw, host)}
+
+
+N8N_PROBE_TMPL = r'''set +e
+export LC_ALL=C
+CONT="$(printf %s '__CONT_B64__' | base64 -d 2>/dev/null)"
+DBC="$(printf %s '__DBC_B64__' | base64 -d 2>/dev/null)"
+DBU="$(printf %s '__DBU_B64__' | base64 -d 2>/dev/null)"
+DBN="$(printf %s '__DBN_B64__' | base64 -d 2>/dev/null)"
+DBP="$(printf %s '__DBP_B64__' | base64 -d 2>/dev/null)"
+resolve_container() {
+  [ -n "$1" ] && command -v docker >/dev/null || return 0
+  docker ps --format '{{.Names}}' | grep -E "^$1(\.|\$)" | head -1
+}
+N8C="$(resolve_container "$CONT")"
+DBC2="$(resolve_container "$DBC")"
+psqlq() { docker exec -e PGPASSWORD="$DBP" "$DBC2" psql -U "$DBU" -d "$DBN" -tAF '|' -c "$1" 2>&1; }
+echo "@@health"
+if [ -n "$N8C" ]; then
+  docker exec "$N8C" wget -q -S -O /dev/null http://localhost:5678/healthz 2>&1 | grep -oE 'HTTP/[0-9.]+ [0-9]+' | grep -oE '[0-9]+$' | head -1
+fi
+echo "@@container"
+if [ -n "$N8C" ]; then docker ps --format '{{json .}}' --filter "name=^$N8C\$" | head -1; fi
+echo "@@workflows"
+if [ -n "$DBC2" ] && [ -n "$DBN" ]; then psqlq "SELECT id, name, active::text, to_char(\"updatedAt\",'YYYY-MM-DD HH24:MI') FROM workflow_entity ORDER BY \"updatedAt\" DESC LIMIT 50"; fi
+echo "@@recent"
+if [ -n "$DBC2" ] && [ -n "$DBN" ]; then psqlq "SELECT e.id, COALESCE(w.name,'(borrado)'), COALESCE(e.status::text, CASE WHEN e.finished THEN 'success' ELSE 'unknown' END), to_char(e.\"startedAt\",'YYYY-MM-DD HH24:MI'), e.mode FROM execution_entity e LEFT JOIN workflow_entity w ON w.id::text=e.\"workflowId\"::text ORDER BY e.\"startedAt\" DESC LIMIT 30"; fi
+echo "@@end"
+'''
+
+
+def probe_n8n(vps_service: dict, n8n_service: dict, meta: dict) -> dict:
+    host = _build_host_from_vps(vps_service)
+    if not host["ssh_host"]:
+        return {"error": "ssh_host no configurado", "data": None}
+    n_cfg = n8n_service.get("config") or {}
+    container = n_cfg.get("container") or "n8n"
+    db_svc = _find_db_service(meta, vps_service["id"])
+    db_cfg = (db_svc or {}).get("config") or {}
+    script = (N8N_PROBE_TMPL
+              .replace("__CONT_B64__", _b64(container))
+              .replace("__DBC_B64__", _b64(db_cfg.get("container") or "postgres"))
+              .replace("__DBU_B64__", _b64(db_cfg.get("db_user") or "postgres"))
+              .replace("__DBN_B64__", _b64(db_cfg.get("db_name") or "n8n"))
+              .replace("__DBP_B64__", _b64(db_cfg.get("db_password") or "")))
+    code, raw, err = ssh_run(host, script, timeout=DETAIL_TIMEOUT)
+    if code != 0:
+        return {"error": (err or "").strip()[:300] or f"ssh exit {code}", "data": None}
+    sec = _split_sections(raw)
+    health = _txt(sec, "health")
+    container_info = None
+    c_raw = _txt(sec, "container")
+    if c_raw.startswith("{"):
+        try:
+            j = json.loads(c_raw)
+            container_info = {"name": j.get("Names", ""), "image": j.get("Image", ""),
+                              "status": j.get("Status", ""), "state": j.get("State", "")}
+        except json.JSONDecodeError:
+            pass
+    workflows = []
+    wf_raw = _txt(sec, "workflows")
+    if wf_raw and not _psql_failed(wf_raw):
+        for line in wf_raw.splitlines():
+            parts = line.split("|")
+            if len(parts) >= 4:
+                workflows.append({"id": parts[0].strip(), "name": parts[1].strip(),
+                                  "active": parts[2].strip() == "true",
+                                  "updated": parts[3].strip()})
+    recent = []
+    rec_raw = _txt(sec, "recent")
+    if rec_raw and not _psql_failed(rec_raw):
+        for line in rec_raw.splitlines():
+            parts = line.split("|")
+            if len(parts) >= 5:
+                recent.append({"id": parts[0].strip(), "workflow": parts[1].strip(),
+                               "status": parts[2].strip(), "started": parts[3].strip(),
+                               "mode": parts[4].strip()})
+    return {"error": None, "data": {
+        "health": health, "health_ok": health == "200",
+        "container": container_info,
+        "workflows": workflows, "recent": recent,
+    }}
+
+
+PG_PROBE_TMPL = r'''set +e
+export LC_ALL=C
+CONT="$(printf %s '__CONT_B64__' | base64 -d 2>/dev/null)"
+DBU="$(printf %s '__DBU_B64__' | base64 -d 2>/dev/null)"
+DBN="$(printf %s '__DBN_B64__' | base64 -d 2>/dev/null)"
+DBP="$(printf %s '__DBP_B64__' | base64 -d 2>/dev/null)"
+resolve_container() {
+  [ -n "$1" ] && command -v docker >/dev/null || return 0
+  docker ps --format '{{.Names}}' | grep -E "^$1(\.|\$)" | head -1
+}
+DBC="$(resolve_container "$CONT")"
+psqlq() { docker exec -e PGPASSWORD="$DBP" "$DBC" psql -U "$DBU" -d "$DBN" -tAF '|' -c "$1" 2>&1; }
+echo "@@isready"
+if [ -n "$DBC" ]; then docker exec "$DBC" pg_isready 2>&1; fi
+echo "@@size";       psqlq "SELECT pg_size_pretty(pg_database_size(current_database()))"
+echo "@@conns";      psqlq "SELECT count(*) FROM pg_stat_activity"
+echo "@@version";    psqlq "SHOW server_version"
+echo "@@active";     psqlq "SELECT pid, COALESCE(state,''), to_char(query_start,'YYYY-MM-DD HH24:MI'), substr(query,1,80) FROM pg_stat_activity WHERE state IS NOT NULL AND state != 'idle' AND pid != pg_backend_pid() ORDER BY query_start LIMIT 10"
+echo "@@tables";     psqlq "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema') ORDER BY 1,2"
+echo "@@columns";    psqlq "SELECT table_schema, table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,ordinal_position"
+echo "@@fks";        psqlq "SELECT tc.table_schema, tc.table_name, kcu.column_name, ccu.table_schema, ccu.table_name, ccu.column_name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name=kcu.constraint_name JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name=tc.constraint_name WHERE tc.constraint_type='FOREIGN KEY'"
+echo "@@end"
+'''
+
+
+def probe_postgres(vps_service: dict, pg_service: dict) -> dict:
+    host = _build_host_from_vps(vps_service)
+    if not host["ssh_host"]:
+        return {"error": "ssh_host no configurado", "data": None}
+    cfg = pg_service.get("config") or {}
+    container = cfg.get("container") or "postgres"
+    db_user = cfg.get("db_user") or "postgres"
+    db_name = cfg.get("db_name") or "postgres"
+    db_pass = cfg.get("db_password") or ""
+    script = (PG_PROBE_TMPL
+              .replace("__CONT_B64__", _b64(container))
+              .replace("__DBU_B64__", _b64(db_user))
+              .replace("__DBN_B64__", _b64(db_name))
+              .replace("__DBP_B64__", _b64(db_pass)))
+    code, raw, err = ssh_run(host, script, timeout=DETAIL_TIMEOUT)
+    if code != 0:
+        return {"error": (err or "").strip()[:300] or f"ssh exit {code}", "data": None}
+    sec = _split_sections(raw)
+    isready = _txt(sec, "isready")
+    size = _txt(sec, "size")
+    conns = _txt(sec, "conns")
+    version = _txt(sec, "version")
+    active = []
+    a_raw = _txt(sec, "active")
+    if a_raw and not _psql_failed(a_raw):
+        for line in a_raw.splitlines():
+            parts = line.split("|")
+            if len(parts) >= 4:
+                active.append({"pid": parts[0].strip(), "state": parts[1].strip(),
+                               "since": parts[2].strip(), "query": parts[3].strip()})
+    tables_idx = {}
+    truncated = False
+    t_raw = _txt(sec, "tables")
+    if t_raw and not _psql_failed(t_raw):
+        for line in t_raw.splitlines():
+            parts = line.split("|")
+            if len(parts) >= 2:
+                key = (parts[0].strip(), parts[1].strip())
+                if len(tables_idx) >= SCHEMA_TABLE_CAP:
+                    truncated = True
+                    break
+                tables_idx[key] = {"schema": key[0], "name": key[1], "columns": []}
+    c_raw = _txt(sec, "columns")
+    col_count = 0
+    if c_raw and not _psql_failed(c_raw):
+        for line in c_raw.splitlines():
+            parts = line.split("|")
+            if len(parts) >= 5:
+                key = (parts[0].strip(), parts[1].strip())
+                if key in tables_idx:
+                    if col_count >= SCHEMA_COLUMN_CAP:
+                        truncated = True
+                        break
+                    tables_idx[key]["columns"].append({
+                        "name": parts[2].strip(),
+                        "type": parts[3].strip(),
+                        "nullable": parts[4].strip() == "YES",
+                    })
+                    col_count += 1
+    fks = []
+    fk_raw = _txt(sec, "fks")
+    if fk_raw and not _psql_failed(fk_raw):
+        for line in fk_raw.splitlines():
+            parts = line.split("|")
+            if len(parts) >= 6:
+                fks.append({
+                    "from_schema": parts[0].strip(), "from_table": parts[1].strip(),
+                    "from_column": parts[2].strip(),
+                    "to_schema": parts[3].strip(), "to_table": parts[4].strip(),
+                    "to_column": parts[5].strip(),
+                })
+    return {"error": None, "data": {
+        "stats": {
+            "isready": isready,
+            "ready": "accepting connections" in isready,
+            "size": None if _psql_failed(size) else size,
+            "conns": int(conns) if conns.isdigit() else None,
+            "version": None if _psql_failed(version) else version,
+            "active_queries": active,
+        },
+        "schema": {
+            "tables": list(tables_idx.values()),
+            "fks": fks,
+            "truncated": truncated,
+        },
+    }}
+
+
+LOGS_PROBE_TMPL = r'''set +e
+export LC_ALL=C
+CONT="$(printf %s '__CONT_B64__' | base64 -d 2>/dev/null)"
+HURL="$(printf %s '__HURL_B64__' | base64 -d 2>/dev/null)"
+TAIL="__TAIL__"
+resolve_container() {
+  [ -n "$1" ] && command -v docker >/dev/null || return 0
+  docker ps -a --format '{{.Names}}' | grep -E "^$1(\.|\$)" | head -1
+}
+C="$(resolve_container "$CONT")"
+echo "@@container"
+if [ -n "$C" ]; then docker ps -a --format '{{json .}}' --filter "name=^$C\$" | head -1; fi
+echo "@@inspect"
+if [ -n "$C" ]; then docker inspect --format '{{json .State}}' "$C" 2>&1 | head -1; fi
+echo "@@logs"
+if [ -n "$C" ]; then docker logs --tail "$TAIL" --timestamps "$C" 2>&1; fi
+echo "@@health"
+if [ -n "$HURL" ]; then curl -s -m 3 -o /dev/null -w '%{http_code}' "$HURL" 2>/dev/null || echo "err"; fi
+echo "@@end"
+'''
+
+
+def probe_container_logs(vps_service: dict, target_service: dict) -> dict:
+    host = _build_host_from_vps(vps_service)
+    if not host["ssh_host"]:
+        return {"error": "ssh_host no configurado", "data": None}
+    cfg = target_service.get("config") or {}
+    container = cfg.get("container") or target_service.get("kind") or ""
+    health_url = cfg.get("health_url") or ""
+    script = (LOGS_PROBE_TMPL
+              .replace("__CONT_B64__", _b64(container))
+              .replace("__HURL_B64__", _b64(health_url))
+              .replace("__TAIL__", str(LOGS_TAIL)))
+    code, raw, err = ssh_run(host, script, timeout=DETAIL_TIMEOUT)
+    if code != 0:
+        return {"error": (err or "").strip()[:300] or f"ssh exit {code}", "data": None}
+    sec = _split_sections(raw)
+    container_info = None
+    c_raw = _txt(sec, "container")
+    if c_raw.startswith("{"):
+        try:
+            j = json.loads(c_raw)
+            container_info = {"name": j.get("Names", ""), "image": j.get("Image", ""),
+                              "status": j.get("Status", ""), "state": j.get("State", "")}
+        except json.JSONDecodeError:
+            pass
+    state_info = None
+    s_raw = _txt(sec, "inspect")
+    if s_raw.startswith("{"):
+        try:
+            state_info = json.loads(s_raw)
+        except json.JSONDecodeError:
+            pass
+    logs = _txt(sec, "logs")
+    health = _txt(sec, "health") or None
+    return {"error": None, "data": {
+        "container": container_info,
+        "state": state_info,
+        "logs": logs,
+        "logs_lines": len(logs.splitlines()) if logs else 0,
+        "health_url": health_url or None,
+        "health_status": health,
+    }}
+
+
+def get_service_detail(client: str, project: str, service_id: str) -> dict:
+    """Devuelve detalle del servicio. Cachea por service_id con TTL DETAIL_TTL."""
+    now = time.time()
+    with DETAIL_LOCK:
+        cached = DETAIL_CACHE.get(service_id)
+    if cached and (now - cached["ts"]) < DETAIL_TTL:
+        return cached["data"]
+
+    meta = load_project_meta(client, project)
+    service = _find_service(meta, service_id)
+    if not service:
+        return {"error": "service no encontrado", "data": None,
+                "service": None, "host_vps": None, "ts": now}
+    host_vps = _find_host_vps(meta, service)
+    if not host_vps:
+        return {"error": "VPS host no encontrado", "data": None,
+                "service": {"id": service["id"], "kind": service["kind"], "name": service["name"]},
+                "host_vps": None, "ts": now}
+
+    kind = service.get("kind")
+    role = (service.get("config") or {}).get("role") or kind
+
+    if kind == "vps":
+        result = probe_vps(service)
+    elif kind == "n8n":
+        result = probe_n8n(host_vps, service, meta)
+    elif kind == "postgres":
+        result = probe_postgres(host_vps, service)
+    elif kind in ("chatwoot", "docker") or role in ("backoffice", "app", "chatwoot"):
+        result = probe_container_logs(host_vps, service)
+    elif kind in ("github", "linear"):
+        result = {"error": None, "data": {"kind": "saas",
+                                          "config": service.get("config") or {}}}
+    else:
+        result = {"error": f"kind '{kind}' sin probe", "data": None}
+
+    response = {
+        "service": {"id": service["id"], "kind": service["kind"], "name": service["name"]},
+        "host_vps": {"id": host_vps["id"], "name": host_vps["name"]},
+        "ts": now,
+        "data": result["data"],
+        "error": result["error"],
+    }
+    with DETAIL_LOCK:
+        DETAIL_CACHE[service_id] = {"ts": now, "data": response}
+    return response
+
+
+# ============================================================ #
+# Fase 8 — Evaluador de alertas                                 #
+# ============================================================ #
+ALERT_STATE = {}                # rule_id → {firing, since, last_check, reason, ...}
+ALERT_LOCK = threading.Lock()
+
+
+def _last_parse_for_vps(vps_id: str) -> dict | None:
+    """Si tenemos un DETAIL_CACHE reciente del VPS, devuelve su parse_report."""
+    with DETAIL_LOCK:
+        entry = DETAIL_CACHE.get(vps_id)
+    if not entry:
+        return None
+    return (entry.get("data") or {}).get("data")
+
+
+def _eval_rule(rule: dict, service: dict, host_vps: dict | None, meta: dict):
+    """Devuelve (firing: bool, reason: str)."""
+    kind = rule["kind"]
+    threshold = rule.get("threshold")
+    vps_id = host_vps["id"] if host_vps else None
+
+    if kind in ("cpu_above", "ram_above", "disk_above"):
+        with HEALTH_LOCK:
+            h = HEALTH_CACHE.get(service["id"]) if service.get("kind") == "vps" else None
+        if not h or not h.get("metrics"):
+            return False, "sin métricas"
+        m = h["metrics"]
+        if kind == "cpu_above" and (m.get("cpu_pct") or 0) > threshold:
+            return True, f"CPU {m['cpu_pct']:.0f}% > {threshold:.0f}%"
+        if kind == "ram_above" and (m.get("ram_pct") or 0) > threshold:
+            return True, f"RAM {m['ram_pct']:.0f}% > {threshold:.0f}%"
+        if kind == "disk_above" and (m.get("disk_pct_max") or 0) > threshold:
+            return True, f"Disk {m['disk_pct_max']:.0f}% > {threshold:.0f}%"
+        return False, ""
+
+    if kind == "container_down":
+        cfg = service.get("config") or {}
+        wanted = (cfg.get("container") or service.get("kind") or "").strip()
+        if not wanted:
+            return False, "container no declarado"
+        parsed = _last_parse_for_vps(vps_id) if vps_id else None
+        if not parsed:
+            with HEALTH_LOCK:
+                hv = HEALTH_CACHE.get(vps_id) if vps_id else None
+            if hv and hv.get("status") == "down":
+                return True, "VPS host down"
+            return False, "sin datos de container"
+        conts = (parsed.get("docker") or {}).get("containers", [])
+        for c in conts:
+            name = c.get("name", "")
+            if name == wanted or name.startswith(wanted + "."):
+                state = (c.get("state") or "").lower()
+                status = (c.get("status") or "").lower()
+                if state == "running" or status.startswith("up"):
+                    return False, ""
+                return True, f"{name} state={state or 'desconocido'}"
+        return True, f"container {wanted} no encontrado"
+
+    if kind == "n8n_workflow_failed":
+        parsed = _last_parse_for_vps(vps_id) if vps_id else None
+        if not parsed:
+            return False, "sin datos n8n"
+        recent = (parsed.get("n8n") or {}).get("recent", [])
+        if not recent:
+            return False, "sin ejecuciones"
+        last = recent[0]
+        if (last.get("status") or "").lower() == "error":
+            return True, f"workflow {last.get('workflow','?')} falló"
+        return False, ""
+
+    if kind == "health_url_not_2xx":
+        cfg = service.get("config") or {}
+        url = cfg.get("health_url")
+        if not url or not host_vps:
+            return False, "health_url o host no declarado"
+        host = _build_host_from_vps(host_vps)
+        # Evitar inyección: url ya fue validada por validate_meta_payload
+        code, raw, err = ssh_run(host,
+            f'curl -s -m 3 -o /dev/null -w "%{{http_code}}" {shlex.quote(url)}',
+            timeout=10)
+        if code != 0:
+            return True, f"ssh err: {(err or '').strip()[:60]}"
+        status = raw.strip()
+        if status.startswith("2"):
+            return False, ""
+        return True, f"HTTP {status or '???'}"
+
+    return False, "kind desconocido"
+
+
+def evaluate_alerts():
+    """Recorre todos los proyectos, lee sus .alerts.json, evalúa contra
+    HEALTH_CACHE/DETAIL_CACHE, actualiza ALERT_STATE."""
+    for client_dir in PROJECTS.iterdir():
+        if not client_dir.is_dir() or not valid_name(client_dir.name):
+            continue
+        for proj_dir in client_dir.iterdir():
+            if not proj_dir.is_dir() or not valid_name(proj_dir.name):
+                continue
+            client, project = client_dir.name, proj_dir.name
+            try:
+                alerts = load_alerts(client, project)
+                meta = load_project_meta(client, project)
+            except (ValueError, OSError):
+                continue
+            for rule in alerts.get("rules", []):
+                if not rule.get("enabled", True):
+                    continue
+                rid = rule.get("id")
+                if not rid:
+                    continue
+                service = _find_service(meta, rule.get("service_id", ""))
+                if not service:
+                    continue
+                host_vps = _find_host_vps(meta, service)
+                try:
+                    firing, reason = _eval_rule(rule, service, host_vps, meta)
+                except Exception as e:
+                    firing, reason = False, f"eval error: {e}"
+                now = time.time()
+                with ALERT_LOCK:
+                    prev = ALERT_STATE.get(rid)
+                    if firing and not (prev and prev.get("firing")):
+                        ALERT_STATE[rid] = {
+                            "rule_id": rid,
+                            "firing": True,
+                            "since": now,
+                            "last_check": now,
+                            "reason": reason,
+                            "client": client,
+                            "project": project,
+                            "service_id": rule.get("service_id"),
+                            "service_name": service.get("name"),
+                            "kind": rule.get("kind"),
+                            "label": rule.get("label"),
+                        }
+                    elif firing:
+                        ALERT_STATE[rid]["last_check"] = now
+                        ALERT_STATE[rid]["reason"] = reason
+                    elif prev and prev.get("firing"):
+                        ALERT_STATE[rid]["firing"] = False
+                        ALERT_STATE[rid]["last_check"] = now
 
 
 # --------------------------------------------------------------------------- #
@@ -1155,7 +1788,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, resp)
         elif path in ("/api/clients", "/api/projects", "/api/repos",
                       "/api/repos/branches", "/api/projects/meta", "/api/world",
-                      "/api/projects/health"):
+                      "/api/projects/health", "/api/services/detail",
+                      "/api/projects/alerts", "/api/alerts/active"):
             if not self._is_authed():
                 return self._json(401, {"error": "no autorizado"})
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -1171,6 +1805,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._world_get()
             elif path == "/api/projects/health":
                 self._projects_health(q.get("client", [""])[0], q.get("project", [""])[0])
+            elif path == "/api/services/detail":
+                self._service_detail(q.get("client", [""])[0],
+                                     q.get("project", [""])[0],
+                                     q.get("service", [""])[0])
+            elif path == "/api/projects/alerts":
+                self._projects_alerts_get(q.get("client", [""])[0],
+                                          q.get("project", [""])[0])
+            elif path == "/api/alerts/active":
+                self._alerts_active()
             else:
                 self._repo_branches(q.get("client", [""])[0], q.get("project", [""])[0],
                                     q.get("name", [""])[0])
@@ -1227,6 +1870,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/projects/delete": self._project_delete,
             "/api/projects/rename": self._project_rename,
             "/api/projects/meta": self._proj_meta_save,
+            "/api/projects/alerts": self._projects_alerts_post,
             "/api/projects/linear-token": self._proj_linear_token_save,
             "/api/repos/clone": self._repo_clone,
             "/api/repos/pull": self._repo_pull,
@@ -1512,6 +2156,60 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     out[vid] = entry
         self._json(200, out)
+
+    # -- Fase 8: detalle de servicio + alertas ----------------------------- #
+    def _service_detail(self, client: str, project: str, service: str):
+        if not client or not project or not service:
+            return self._json(400, {"error": "client/project/service requeridos"})
+        if not (valid_name(client) and valid_name(project)):
+            return self._json(400, {"error": "nombre inválido"})
+        try:
+            resp = get_service_detail(client, project, service)
+        except ValueError as e:
+            return self._json(400, {"error": str(e)})
+        except Exception as e:
+            return self._json(500, {"error": f"detail error: {e}"})
+        return self._json(200, resp)
+
+    def _projects_alerts_get(self, c: str, p: str):
+        if not (valid_name(c) and valid_name(p)):
+            return self._json(400, {"error": "nombre inválido"})
+        try:
+            rules = load_alerts(c, p).get("rules", [])
+        except Exception as e:
+            return self._json(500, {"error": str(e)})
+        with ALERT_LOCK:
+            state = {rid: dict(v) for rid, v in ALERT_STATE.items()
+                     if v.get("client") == c and v.get("project") == p}
+        return self._json(200, {"rules": rules, "state": state})
+
+    def _projects_alerts_post(self):
+        body = self._read_body()
+        c = (body.get("client") or "").strip()
+        p = (body.get("project") or "").strip()
+        if not (valid_name(c) and valid_name(p)):
+            return self._json(400, {"error": "nombre inválido"})
+        payload = {"rules": body.get("rules", [])}
+        normalized, err = validate_alerts_payload(payload)
+        if normalized is None:
+            return self._json(400, {"error": err})
+        try:
+            save_alerts(c, p, normalized)
+        except Exception as e:
+            return self._json(500, {"error": str(e)})
+        keep = {r["id"] for r in normalized["rules"]}
+        with ALERT_LOCK:
+            for rid in list(ALERT_STATE.keys()):
+                st = ALERT_STATE[rid]
+                if st.get("client") == c and st.get("project") == p and rid not in keep:
+                    ALERT_STATE.pop(rid, None)
+        return self._json(200, {"ok": True, "rules": normalized["rules"]})
+
+    def _alerts_active(self):
+        with ALERT_LOCK:
+            firing = [dict(v) for v in ALERT_STATE.values() if v.get("firing")]
+        firing.sort(key=lambda x: x.get("since", 0))
+        return self._json(200, {"alerts": firing})
 
     def _proj_meta_save(self):
         """Reemplaza la metadata del proyecto entera (servicios + conexiones).

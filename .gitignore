@@ -19,3 +19,6 @@ __pycache__/
 # Metadata por proyecto (Fase 1)
 *.panel.json
 *.linear.token
+
+# Reglas de alertas por proyecto (Fase 8)
+*.alerts.json

@@ -8,6 +8,15 @@
   <link rel="stylesheet" href="/static/map2d.css">
 </head>
 <body>
+  <!-- Banner global de alertas (Fase 8) -->
+  <div id="alerts-banner" class="hidden">
+    <span class="ab-icon">⚠</span>
+    <span class="ab-count">0</span>
+    <span class="ab-text">alertas activas</span>
+    <button id="alerts-banner-toggle" class="btn">Ver</button>
+    <div id="alerts-banner-list" class="hidden"></div>
+  </div>
+
   <div id="login">
     <div class="card">
       <h1>Panel Claude</h1>
@@ -42,6 +51,8 @@
       <button id="mapRefreshBtn" class="btn">↻ refrescar</button>
     </header>
     <div id="map-grid"></div>
+    <!-- Vista detalle de una VPS (Fase 8): se rellena al click en una card -->
+    <div id="vps-detail-view" class="hidden"></div>
     <div id="map-empty" class="hidden">
       <div class="empty-card">
         <h2>Aún no tienes VPSs</h2>
@@ -72,6 +83,7 @@
     <div class="proj-tabs">
       <button class="proj-tab active" data-view="repos">Repos</button>
       <button class="proj-tab" data-view="map">Mapa</button>
+      <button class="proj-tab" data-view="alerts">Alertas</button>
     </div>
     <div id="repos-area">
       <aside id="sidebar">
@@ -110,6 +122,9 @@
           </div>
         </footer>
       </div>
+    </div>
+    <div id="alerts-area" class="hidden">
+      <div id="alerts-panel-content"></div>
     </div>
     <div id="map-area" class="hidden">
       <div class="map-editor">

@@ -251,8 +251,11 @@ function projTabSet(view) {
   document.querySelectorAll(".proj-tab").forEach(b => b.classList.toggle("active", b.dataset.view === view));
   $("#repos-area").classList.toggle("hidden", view !== "repos");
   $("#map-area").classList.toggle("hidden", view !== "map");
+  $("#alerts-area").classList.toggle("hidden", view !== "alerts");
   if (view === "map") enterMapTab();
+  if (view === "alerts") enterAlertsTab();
 }
+window.projTabSet = projTabSet;
 
 document.querySelectorAll(".proj-tab").forEach(b => b.onclick = () => projTabSet(b.dataset.view));
 
@@ -284,6 +287,160 @@ async function loadMeta(client, project) {
 async function enterMapTab() {
   if (!selClient || !selProject) return;
   await loadMeta(selClient, selProject);
+}
+
+// =============== Fase 8: tab Alertas ================ //
+async function enterAlertsTab() {
+  if (!selClient || !selProject) return;
+  if (mapState.services.length === 0) {
+    await loadMeta(selClient, selProject).catch(() => {});
+  }
+  await renderAlertsTab();
+}
+
+const ALERT_KINDS_UI = [
+  { value: "cpu_above",            label: "CPU >",                  needsT: true },
+  { value: "ram_above",            label: "RAM >",                  needsT: true },
+  { value: "disk_above",           label: "Disk >",                 needsT: true },
+  { value: "container_down",       label: "Container caído",        needsT: false },
+  { value: "n8n_workflow_failed",  label: "Workflow n8n falló",     needsT: false },
+  { value: "health_url_not_2xx",   label: "Health URL no 2xx",      needsT: false },
+];
+
+async function renderAlertsTab() {
+  const container = $("#alerts-panel-content");
+  container.innerHTML = `<div class="muted" style="padding:20px">Cargando alertas…</div>`;
+  let data;
+  try {
+    const r = await fetch(`/api/projects/alerts?client=${encodeURIComponent(selClient)}&project=${encodeURIComponent(selProject)}`);
+    data = await r.json();
+  } catch (e) {
+    container.innerHTML = `<div class="error">${esc(e.message)}</div>`;
+    return;
+  }
+  const services = mapState.services || [];
+  const rules = data.rules || [];
+  const state = data.state || {};
+  container.innerHTML = `
+    <div class="alerts-panel">
+      <div class="alerts-header">
+        <h3>Alertas (${rules.length})</h3>
+        <button class="btn" id="alerts-new-btn">+ Nueva regla</button>
+      </div>
+      ${rules.length === 0
+        ? '<div class="muted" style="padding:12px">Sin reglas todavía. Crea una para recibir avisos.</div>'
+        : `<table class="alerts-table">
+            <thead><tr><th>Etiqueta</th><th>Servicio</th><th>Tipo</th><th>Umbral</th><th>Estado</th><th>Activa</th><th></th></tr></thead>
+            <tbody>${rules.map(r => renderAlertRow(r, services, state[r.id])).join("")}</tbody>
+          </table>`}
+      <div id="alert-form" class="hidden"></div>
+    </div>`;
+  $("#alerts-new-btn").onclick = () => showAlertForm(null, rules, services);
+  rules.forEach(r => {
+    const e = document.getElementById(`alert-edit-${r.id}`);
+    if (e) e.onclick = () => showAlertForm(r, rules, services);
+    const d = document.getElementById(`alert-del-${r.id}`);
+    if (d) d.onclick = () => deleteAlert(r.id, rules);
+    const t = document.getElementById(`alert-toggle-${r.id}`);
+    if (t) t.onchange = () => toggleAlertEnabled(r.id, t.checked, rules);
+  });
+}
+
+function renderAlertRow(r, services, st) {
+  const svc = services.find(s => s.id === r.service_id);
+  const svcLabel = svc ? `${esc(svc.kind)}/${esc(svc.name)}` : `<i>(${esc(r.service_id)} no encontrado)</i>`;
+  const stPill = st && st.firing
+    ? `<span class="health-pill health-pill-bad">firing</span> <span class="muted">${esc((st.reason||"").substring(0, 50))}</span>`
+    : `<span class="muted">ok</span>`;
+  return `<tr>
+    <td>${esc(r.label || "-")}</td>
+    <td>${svcLabel}</td>
+    <td><code>${esc(r.kind)}</code></td>
+    <td>${r.threshold == null ? "-" : r.threshold}</td>
+    <td>${stPill}</td>
+    <td><input type="checkbox" id="alert-toggle-${r.id}" ${r.enabled ? "checked" : ""}/></td>
+    <td>
+      <button class="btn-mini" id="alert-edit-${r.id}">editar</button>
+      <button class="btn-mini danger" id="alert-del-${r.id}">borrar</button>
+    </td>
+  </tr>`;
+}
+
+function showAlertForm(rule, rules, services) {
+  const form = $("#alert-form");
+  form.classList.remove("hidden");
+  const r = rule || { id: "", service_id: services[0]?.id || "", kind: "cpu_above",
+                      threshold: 80, enabled: true, label: "" };
+  form.innerHTML = `
+    <h4>${rule ? "Editar regla" : "Nueva regla"}</h4>
+    <label>Etiqueta <input id="af-label" value="${esc(r.label||"")}" placeholder="Nombre descriptivo"/></label>
+    <label>Servicio
+      <select id="af-service">
+        ${services.map(s => `<option value="${esc(s.id)}" ${s.id===r.service_id?"selected":""}>${esc(s.kind)} · ${esc(s.name)}</option>`).join("")}
+      </select>
+    </label>
+    <label>Tipo
+      <select id="af-kind">
+        ${ALERT_KINDS_UI.map(k => `<option value="${k.value}" ${k.value===r.kind?"selected":""}>${esc(k.label)}</option>`).join("")}
+      </select>
+    </label>
+    <label>Umbral <input id="af-threshold" type="number" min="0" max="100" step="1" value="${r.threshold ?? ""}" /></label>
+    <label><input id="af-enabled" type="checkbox" ${r.enabled?"checked":""}/> Activa</label>
+    <div class="modal-actions">
+      <button class="btn" id="af-cancel">Cancelar</button>
+      <button class="btn primary" id="af-save">Guardar</button>
+    </div>`;
+  const updateThresholdVisibility = () => {
+    const k = $("#af-kind").value;
+    const info = ALERT_KINDS_UI.find(x => x.value === k);
+    $("#af-threshold").parentElement.style.display = (info && info.needsT) ? "block" : "none";
+  };
+  $("#af-kind").onchange = updateThresholdVisibility;
+  updateThresholdVisibility();
+  $("#af-cancel").onclick = () => form.classList.add("hidden");
+  $("#af-save").onclick = async () => {
+    const k = $("#af-kind").value;
+    const needsT = ALERT_KINDS_UI.find(x => x.value === k)?.needsT;
+    const updated = {
+      id: r.id || "",
+      service_id: $("#af-service").value,
+      kind: k,
+      threshold: needsT ? parseFloat($("#af-threshold").value) : null,
+      enabled: $("#af-enabled").checked,
+      label: $("#af-label").value,
+    };
+    if (needsT && (isNaN(updated.threshold) || updated.threshold < 0 || updated.threshold > 100)) {
+      alert("Umbral inválido (0–100)"); return;
+    }
+    const next = rule
+      ? rules.map(x => x.id === rule.id ? updated : x)
+      : [...rules, updated];
+    await saveAlerts(next);
+  };
+}
+
+async function saveAlerts(rules) {
+  const r = await fetch("/api/projects/alerts", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({client: selClient, project: selProject, rules})
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(()=>({error:"error"}));
+    alert("Error: " + (e.error || r.status));
+    return;
+  }
+  renderAlertsTab();
+}
+
+async function deleteAlert(id, rules) {
+  if (!confirm("¿Borrar esta regla?")) return;
+  await saveAlerts(rules.filter(r => r.id !== id));
+}
+
+async function toggleAlertEnabled(id, enabled, rules) {
+  const next = rules.map(r => r.id === id ? {...r, enabled} : r);
+  await saveAlerts(next);
 }
 
 function renderMap() {
