@@ -395,11 +395,12 @@ function renderVpsDetailView() {
       <div class="detail-center-metrics">${esc(metricsLine)}</div>
       <div class="detail-center-hint">click para ver detalle completo del sistema →</div>
     </section>
-    <section class="detail-tiles">
-      ${item.hostedServices.length === 0
-        ? '<div class="muted" style="grid-column:1/-1;padding:20px;text-align:center">(sin servicios alojados — añade alguno con config.on_host)</div>'
-        : item.hostedServices.map(s => renderTile(s)).join("")}
-    </section>`;
+    `;
+  // Fase 8.3 — sección unificada: cada container running es un nodo.
+  // Si está vinculado a un service declarado, hereda nombre + drawer del kind.
+  // Si no está vinculado, abre drawer genérico con docker logs.
+  html += renderHostedServicesSection(item.hostedServices);
+
   if (item.satellites.length > 0) {
     html += `<section class="detail-satellites">
       <h4>Satélites SaaS</h4>
@@ -408,9 +409,6 @@ function renderVpsDetailView() {
       </div>
     </section>`;
   }
-
-  // Fase 8.1 — contenedores docker descubiertos vía probe_vps
-  html += renderDockerContainersSection(item.hostedServices);
 
   html += `<aside id="svc-drawer" class="hidden"></aside>`;
   view.innerHTML = html;
@@ -456,59 +454,101 @@ function classifyContainer(name) {
   return { env, role, label };
 }
 
-function renderDockerContainersSection(hostedServices) {
-  const docker = (detailVpsData && detailVpsData.data && detailVpsData.data.docker) || null;
-  if (!docker) {
-    return `<section class="detail-containers">
-      <h4>Contenedores Docker</h4>
-      <div class="muted" style="padding:12px">Cargando contenedores…</div>
-    </section>`;
+// Mapea kind de service declarado a un grupo de los CONTAINER_ROLE_GROUPS
+function _serviceKindToRoleGroup(kind, name) {
+  if (kind === "n8n") return "n8n";
+  if (kind === "postgres") return "db";
+  if (kind === "chatwoot") return "chatwoot";
+  if (kind === "docker") {
+    // Heurística por nombre
+    const m = classifyContainer(name || "");
+    return m.role;
   }
-  if (docker.available === false) {
-    return `<section class="detail-containers">
-      <h4>Contenedores Docker</h4>
-      <div class="muted" style="padding:12px">docker no disponible en este host (o el usuario SSH no tiene acceso)</div>
-    </section>`;
-  }
-  const all = docker.containers || [];
-  const running = all.filter(c => (c.state || "").toLowerCase() === "running");
-  if (running.length === 0) {
-    return `<section class="detail-containers">
-      <h4>Contenedores corriendo (0/${all.length})</h4>
-      <div class="muted" style="padding:12px">no hay contenedores running (${all.length - running.length} en estado distinto)</div>
-    </section>`;
-  }
+  return "other";
+}
 
-  // Map de containers declarados (por nombre exacto o prefijo)
+function renderHostedServicesSection(hostedServices) {
+  const docker = (detailVpsData && detailVpsData.data && detailVpsData.data.docker) || null;
+
+  // Map de containers declarados (nombre exacto o prefijo)
   const declaredByName = new Map();
   for (const s of hostedServices) {
     const cont = s.config && s.config.container;
     if (cont) declaredByName.set(cont, s);
   }
 
-  // Agrupar por rol
+  // Si docker no está disponible, fallback: renderiza los hosted services declarados
+  // como tiles (mismo aspecto que F8 original).
+  if (!docker) {
+    return `<section class="detail-containers">
+      <h4>Servicios alojados</h4>
+      <div class="muted" style="padding:12px">Cargando contenedores docker…</div>
+      ${hostedServices.length > 0 ? `<div class="detail-tiles">${hostedServices.map(s => renderUnifiedTile({declared: s, container: null, meta: classifyContainer((s.config&&s.config.container)||s.name)}, KIND_COLORS[s.kind] || KIND_COLORS.custom)).join("")}</div>` : ""}
+    </section>`;
+  }
+  if (docker.available === false) {
+    return `<section class="detail-containers">
+      <h4>Servicios alojados</h4>
+      <div class="muted" style="padding:12px">docker no disponible en este host (instálalo o añade el usuario SSH al grupo docker). Mostrando servicios declarados:</div>
+      ${hostedServices.length > 0
+        ? `<div class="detail-tiles">${hostedServices.map(s => renderUnifiedTile({declared: s, container: null, meta: classifyContainer((s.config&&s.config.container)||s.name)}, KIND_COLORS[s.kind] || KIND_COLORS.custom)).join("")}</div>`
+        : '<div class="muted" style="padding:12px">(sin servicios declarados)</div>'}
+    </section>`;
+  }
+
+  const all = docker.containers || [];
+  const running = all.filter(c => (c.state || "").toLowerCase() === "running");
+
+  // Bucketize: cada container corre la rueda de clasificación; declared services
+  // sin container backing también se añaden al bucket por su kind.
   const grouped = new Map(CONTAINER_ROLE_GROUPS.map(g => [g.key, []]));
+  const matchedDeclaredIds = new Set();
+
   for (const c of running) {
     const meta = classifyContainer(c.name);
-    grouped.get(meta.role).push({ ...c, _meta: meta });
+    let declared = declaredByName.get(c.name) || null;
+    if (!declared) {
+      for (const [n, svc] of declaredByName) {
+        if (c.name === n || c.name.startsWith(n + ".")) { declared = svc; break; }
+      }
+    }
+    if (declared) matchedDeclaredIds.add(declared.id);
+    grouped.get(meta.role).push({ container: c, meta, declared });
+  }
+
+  // Declared services sin container running (manuales o el container está apagado)
+  for (const s of hostedServices) {
+    if (matchedDeclaredIds.has(s.id)) continue;
+    const declaredContainer = (s.config && s.config.container) || s.name;
+    const meta = classifyContainer(declaredContainer);
+    const role = _serviceKindToRoleGroup(s.kind, declaredContainer);
+    if (!grouped.has(role)) grouped.set(role, []);
+    grouped.get(role).push({ container: null, meta: { ...meta, role }, declared: s });
   }
 
   // Render
+  const totalTiles = Array.from(grouped.values()).reduce((n, arr) => n + arr.length, 0);
+  if (totalTiles === 0) {
+    return `<section class="detail-containers">
+      <h4>Servicios alojados (0)</h4>
+      <div class="muted" style="padding:12px">no hay contenedores corriendo ni servicios declarados</div>
+    </section>`;
+  }
   let html = `<section class="detail-containers">
-    <h4>Contenedores corriendo (${running.length}/${all.length})</h4>`;
+    <h4>Servicios alojados (${totalTiles}) · ${running.length} containers running de ${all.length} totales</h4>`;
   const envOrder = { testing: 0, staging: 1, global: 2 };
   for (const g of CONTAINER_ROLE_GROUPS) {
     const items = grouped.get(g.key);
     if (!items || items.length === 0) continue;
     items.sort((a, b) => {
-      const d = (envOrder[a._meta.env] ?? 99) - (envOrder[b._meta.env] ?? 99);
+      const d = (envOrder[a.meta.env] ?? 99) - (envOrder[b.meta.env] ?? 99);
       if (d !== 0) return d;
-      return a.name.localeCompare(b.name);
+      return (a.meta.label || "").localeCompare(b.meta.label || "");
     });
     html += `<div class="container-group" style="border-left:3px solid ${g.color}">
       <h5>${esc(g.label)} <span class="container-group-count">${items.length}</span></h5>
       <div class="detail-tiles">
-        ${items.map(c => renderRunningContainerTile(c, g.color, declaredByName)).join("")}
+        ${items.map(it => renderUnifiedTile(it, g.color)).join("")}
       </div>
     </div>`;
   }
@@ -516,36 +556,66 @@ function renderDockerContainersSection(hostedServices) {
   return html;
 }
 
-function renderRunningContainerTile(c, color, declaredByName) {
-  const meta = c._meta;
+// Tile unificado: usado para containers running, declared services sin container,
+// y también para hosted services cuando docker está down. Estilo = tile declarado original.
+function renderUnifiedTile(item, color) {
+  const { container, meta, declared } = item;
+
+  // Nombre principal: si hay declared service, su .name (ej. "n8n (testing)").
+  // Si no, label del classifier (nombre limpio del container).
+  const title = declared ? declared.name : meta.label;
+
+  // Subtítulo: imagen del container si lo hay, o role del declared.
+  let subtitle = "";
+  if (container) {
+    subtitle = (container.image || "").substring(0, 50);
+  } else if (declared) {
+    subtitle = `kind: ${declared.kind}`;
+    if (declared.config && declared.config.container) {
+      subtitle += ` · container: ${declared.config.container}`;
+    }
+  }
+
+  // env badge
   let envBadge = "";
   if (meta.env === "testing") {
     envBadge = '<span class="env-badge env-testing" title="entorno testing — producción según tu setup">testing</span>';
   } else if (meta.env === "staging") {
     envBadge = '<span class="env-badge env-staging">stg</span>';
   }
-  // Declared service match (exacto o por prefijo de swarm)
-  let declared = declaredByName.get(c.name);
-  if (!declared) {
-    for (const [n, svc] of declaredByName) {
-      if (c.name === n || c.name.startsWith(n + ".")) { declared = svc; break; }
-    }
-  }
+
+  // declared chip (kind del service vinculado)
   const declaredChip = declared
-    ? `<span class="container-declared-chip" title="declarado como ${esc(declared.kind)}/${esc(declared.name)}">declarado</span>`
+    ? `<span class="container-declared-chip" title="vinculado a service declarado ${esc(declared.kind)}/${esc(declared.name)}">${esc(declared.kind)}</span>`
     : "";
-  const metric = (c.cpu || c.mem)
-    ? `<div class="tile-role muted">CPU ${esc(c.cpu || "-")} · MEM ${esc(c.mem || "-")}</div>`
+
+  // Métricas si hay container
+  const metric = container && (container.cpu || container.mem)
+    ? `<div class="tile-role muted">CPU ${esc(container.cpu || "-")} · MEM ${esc(container.mem || "-")}</div>`
     : "";
+
+  // State pill
+  let pill = "";
+  if (container) {
+    pill = '<span class="health-pill health-pill-ok">running</span>';
+  } else if (declared && declared.config && declared.config.container) {
+    pill = '<span class="health-pill health-pill-bad">sin container running</span>';
+  } else if (declared) {
+    pill = '<span class="health-pill" style="background:rgba(110,118,129,0.2);color:#c9d1d9">declared</span>';
+  }
+
+  // Click: si hay declared, drawer del service (kind-specific). Si no, drawer container (logs).
+  const dataAttr = declared
+    ? `data-action="open-svc" data-service-id="${esc(declared.id)}"`
+    : `data-action="open-container" data-container-name="${esc(container.name)}"`;
+
   return `
-    <div class="detail-tile detail-tile-container"
-         data-container-name="${esc(c.name)}" data-action="open-container"
-         style="border-left:4px solid ${color}">
+    <div class="detail-tile" ${dataAttr} style="border-left:4px solid ${color}">
       <div class="tile-kind">${envBadge} ${declaredChip}</div>
-      <div class="tile-name">${esc(meta.label)}</div>
-      <div class="tile-role muted" title="${esc(c.image)}">${esc((c.image||"").substring(0,40))}</div>
+      <div class="tile-name">${esc(title)}</div>
+      <div class="tile-role muted" title="${esc(subtitle)}">${esc(subtitle)}</div>
       ${metric}
-      <div style="margin-top:6px"><span class="health-pill health-pill-ok">running</span></div>
+      <div style="margin-top:6px">${pill}</div>
     </div>`;
 }
 
