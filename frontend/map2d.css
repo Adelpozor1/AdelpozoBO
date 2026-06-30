@@ -252,6 +252,46 @@
   letter-spacing: 0.5px;
 }
 
+/* Fase 8.2 — agrupación por rol + env badges */
+.container-group {
+  margin: 14px 0;
+  padding: 6px 0 6px 12px;
+}
+.container-group h5 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text);
+  margin: 0 0 8px 0;
+  font-weight: 600;
+}
+.container-group-count {
+  background: var(--tool);
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 1px 6px;
+  font-size: 10px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.env-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.env-testing {
+  background: rgba(212, 160, 23, 0.22);
+  color: #d4a017;
+}
+.env-staging {
+  background: rgba(110, 118, 129, 0.25);
+  color: #c9d1d9;
+}
+
 /* Drawer */
 #svc-drawer {
   position: fixed;

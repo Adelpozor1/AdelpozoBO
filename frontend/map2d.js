@@ -419,6 +419,43 @@ function renderVpsDetailView() {
   else if (detailContainerName) openContainerDrawer(detailContainerName);
 }
 
+// Grupos por rol semántico. Orden = orden de render.
+const CONTAINER_ROLE_GROUPS = [
+  { key: "backoffice",  label: "Backoffice",       color: "#a371f7" },
+  { key: "frontoffice", label: "Frontoffice",      color: "#6366f1" },
+  { key: "chatwoot",    label: "Chatwoot",         color: "#f48120" },
+  { key: "n8n",         label: "n8n",              color: "#a371f7" },
+  { key: "db",          label: "Base de datos",    color: "#336791" },
+  { key: "cache",       label: "Cache / cola",     color: "#dc2626" },
+  { key: "proxy",       label: "Proxy / edge",     color: "#0ea5e9" },
+  { key: "infra",       label: "Infraestructura",  color: "#8b949e" },
+  { key: "other",       label: "Otros",            color: "#6e7681" },
+];
+
+// Clasifica un container por nombre → {env, role, label}.
+// env: "testing" (= producción para este usuario), "staging", o "global".
+function classifyContainer(name) {
+  // Quita sufijo de Docker Swarm: foo.1.abc → foo
+  const base = name.replace(/\.\d+\.[a-z0-9]+$/i, "");
+  let env = "global";
+  if (/^testing[_-]/i.test(base) || /[_-]testing(?:[_-]|$)/i.test(base)) env = "testing";
+  else if (/^staging[_-]/i.test(base) || /^stg[_-]/i.test(base) || /[_-]staging(?:[_-]|$)/i.test(base) || /[_-]stg(?:[_-]|$)/i.test(base)) env = "staging";
+  let role = "other";
+  if (/backoffice/i.test(base))                                    role = "backoffice";
+  else if (/frontoffice|frontend|^webapp|web[_-]?app/i.test(base)) role = "frontoffice";
+  else if (/chatwoot/i.test(base))                                 role = "chatwoot";
+  else if (/n8n/i.test(base))                                      role = "n8n";
+  else if (/postgres|postgis|^db[_-]|^pg[_-]|database|base[_-]de[_-]datos|mysql|mariadb|mongo/i.test(base)) role = "db";
+  else if (/redis|rabbit|kafka|memcache|sidekiq|worker|queue/i.test(base)) role = "cache";
+  else if (/traefik|nginx|envoy|caddy|haproxy/i.test(base))        role = "proxy";
+  else if (/easypanel|portainer|dokploy|coolify/i.test(base))      role = "infra";
+  // Etiqueta limpia: quita el prefijo env si existe
+  let label = base;
+  if (env === "testing") label = base.replace(/^testing[_-]/i, "");
+  else if (env === "staging") label = base.replace(/^staging[_-]|^stg[_-]/i, "");
+  return { env, role, label };
+}
+
 function renderDockerContainersSection(hostedServices) {
   const docker = (detailVpsData && detailVpsData.data && detailVpsData.data.docker) || null;
   if (!docker) {
@@ -433,37 +470,67 @@ function renderDockerContainersSection(hostedServices) {
       <div class="muted" style="padding:12px">docker no disponible en este host (o el usuario SSH no tiene acceso)</div>
     </section>`;
   }
-  const containers = docker.containers || [];
-  if (containers.length === 0) {
+  const all = docker.containers || [];
+  const running = all.filter(c => (c.state || "").toLowerCase() === "running");
+  if (running.length === 0) {
     return `<section class="detail-containers">
-      <h4>Contenedores Docker (0)</h4>
-      <div class="muted" style="padding:12px">no hay contenedores corriendo</div>
+      <h4>Contenedores corriendo (0/${all.length})</h4>
+      <div class="muted" style="padding:12px">no hay contenedores running (${all.length - running.length} en estado distinto)</div>
     </section>`;
   }
-  // Detectar qué contenedores ya están "declarados" como service.config.container
+
+  // Map de containers declarados (por nombre exacto o prefijo)
   const declaredByName = new Map();
   for (const s of hostedServices) {
     const cont = s.config && s.config.container;
     if (cont) declaredByName.set(cont, s);
   }
-  return `<section class="detail-containers">
-    <h4>Contenedores Docker (${containers.length})</h4>
-    <div class="detail-tiles">
-      ${containers.map(c => renderContainerTile(c, declaredByName)).join("")}
-    </div>
-  </section>`;
+
+  // Agrupar por rol
+  const grouped = new Map(CONTAINER_ROLE_GROUPS.map(g => [g.key, []]));
+  for (const c of running) {
+    const meta = classifyContainer(c.name);
+    grouped.get(meta.role).push({ ...c, _meta: meta });
+  }
+
+  // Render
+  let html = `<section class="detail-containers">
+    <h4>Contenedores corriendo (${running.length}/${all.length})</h4>`;
+  const envOrder = { testing: 0, staging: 1, global: 2 };
+  for (const g of CONTAINER_ROLE_GROUPS) {
+    const items = grouped.get(g.key);
+    if (!items || items.length === 0) continue;
+    items.sort((a, b) => {
+      const d = (envOrder[a._meta.env] ?? 99) - (envOrder[b._meta.env] ?? 99);
+      if (d !== 0) return d;
+      return a.name.localeCompare(b.name);
+    });
+    html += `<div class="container-group" style="border-left:3px solid ${g.color}">
+      <h5>${esc(g.label)} <span class="container-group-count">${items.length}</span></h5>
+      <div class="detail-tiles">
+        ${items.map(c => renderRunningContainerTile(c, g.color, declaredByName)).join("")}
+      </div>
+    </div>`;
+  }
+  html += `</section>`;
+  return html;
 }
 
-function renderContainerTile(c, declaredByName) {
-  // Matchear por prefijo: container "n8n.1.abc" matchea declarado "n8n"
+function renderRunningContainerTile(c, color, declaredByName) {
+  const meta = c._meta;
+  let envBadge = "";
+  if (meta.env === "testing") {
+    envBadge = '<span class="env-badge env-testing" title="entorno testing — producción según tu setup">testing</span>';
+  } else if (meta.env === "staging") {
+    envBadge = '<span class="env-badge env-staging">stg</span>';
+  }
+  // Declared service match (exacto o por prefijo de swarm)
   let declared = declaredByName.get(c.name);
   if (!declared) {
-    for (const [name, svc] of declaredByName) {
-      if (c.name === name || c.name.startsWith(name + ".")) { declared = svc; break; }
+    for (const [n, svc] of declaredByName) {
+      if (c.name === n || c.name.startsWith(n + ".")) { declared = svc; break; }
     }
   }
-  const stateClass = (c.state || "").toLowerCase() === "running" ? "ok" : "bad";
-  const stateBadge = `<span class="health-pill health-pill-${stateClass}">${esc(c.state || "?")}</span>`;
   const declaredChip = declared
     ? `<span class="container-declared-chip" title="declarado como ${esc(declared.kind)}/${esc(declared.name)}">declarado</span>`
     : "";
@@ -473,12 +540,12 @@ function renderContainerTile(c, declaredByName) {
   return `
     <div class="detail-tile detail-tile-container"
          data-container-name="${esc(c.name)}" data-action="open-container"
-         style="border-left:4px solid ${KIND_COLORS.docker}">
-      <div class="tile-kind">container ${declaredChip}</div>
-      <div class="tile-name">${esc(c.name)}</div>
+         style="border-left:4px solid ${color}">
+      <div class="tile-kind">${envBadge} ${declaredChip}</div>
+      <div class="tile-name">${esc(meta.label)}</div>
       <div class="tile-role muted" title="${esc(c.image)}">${esc((c.image||"").substring(0,40))}</div>
       ${metric}
-      <div style="margin-top:6px">${stateBadge}</div>
+      <div style="margin-top:6px"><span class="health-pill health-pill-ok">running</span></div>
     </div>`;
 }
 
