@@ -271,16 +271,28 @@ function buildTopologyNodes(vps, hostedServices) {
 // Si !preview, formato grande con labels, click por nodo, etc.
 function renderTopologySVG(nodes, vpsService, vpsMetricsLine, vpsStatus, opts = {}) {
   const isPreview = !!opts.preview;
-  const W = isPreview ? 260 : 960;
-  const H = isPreview ? 200 : 560;
-  const cx = W / 2, cy = H / 2;
   const roadColor = vpsStatus === "ok" ? "#22c55e" : vpsStatus === "warn" ? "#f59e0b" : "#ef4444";
   const cls = isPreview ? "vps-mini-map" : "detail-topology";
-
   const N = nodes.length;
-  // Radio: deja margen suficiente para el tamaño de los nodos
-  const nodeHalf = isPreview ? 8 : 56;     // semi-ancho aprox
-  const radius = Math.min(W, H) / 2 - nodeHalf - (isPreview ? 8 : 24);
+
+  // Tamaño de cada nodo y separación mínima en la circunferencia
+  const boxW    = isPreview ? 0   : 110;
+  const boxH    = isPreview ? 0   : 50;
+  const spacing = isPreview ? 18  : 130;   // distancia mínima entre centros sobre la circunferencia
+  const minR    = isPreview ? 70  : 200;
+
+  // Radio dinámico para que los nodos no se solapen: si hay muchos,
+  // se aumenta. Y el viewBox crece en consecuencia.
+  const radiusNeeded = N > 0
+    ? Math.max(minR, (spacing * N) / (2 * Math.PI))
+    : minR;
+  const margin = isPreview ? 10 : 40;
+  const baseW = isPreview ? 260 : 960;
+  const baseH = isPreview ? 200 : 560;
+  const W = Math.max(baseW, Math.round(radiusNeeded * 2 + boxW + margin * 2));
+  const H = Math.max(baseH, Math.round(radiusNeeded * 2 + boxH + margin * 2));
+  const cx = W / 2, cy = H / 2;
+  const radius = radiusNeeded;
 
   let svg = `<svg class="${cls}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
 
@@ -320,19 +332,19 @@ function renderTopologySVG(nodes, vpsService, vpsMetricsLine, vpsStatus, opts = 
       // Solo un punto pequeño coloreado
       svg += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="6" fill="${n.color}" stroke="#fff" stroke-width="0.8" opacity="0.95" />`;
     } else {
-      const w = 112, h = 56;
-      const title = (n.declared ? n.declared.name : n.meta.label) || "?";
-      const sub = n.declared ? n.declared.kind : "container";
-      const envTxt = n.meta.env !== "global" ? n.meta.env : "";
+      const title = String(n.declared ? n.declared.name : n.meta.label) || "?";
+      const sub = String(n.declared ? n.declared.kind : "container");
+      const envTxt = String(n.meta.env || "");
+      const showEnv = envTxt && envTxt !== "global";
       const dataAttr = n.declared
         ? `data-action="open-svc" data-service-id="${esc(n.declared.id)}"`
         : `data-action="open-container" data-container-name="${esc(n.container.name)}"`;
       svg += `<g class="topo-node" ${dataAttr} style="cursor:pointer">
-        <rect x="${(p.x - w/2).toFixed(1)}" y="${(p.y - h/2).toFixed(1)}" width="${w}" height="${h}" rx="6"
+        <rect x="${(p.x - boxW/2).toFixed(1)}" y="${(p.y - boxH/2).toFixed(1)}" width="${boxW}" height="${boxH}" rx="6"
               fill="${n.color}" stroke="#fff" stroke-width="1.5" opacity="0.96" />
-        <text x="${p.x.toFixed(1)}" y="${(p.y - 14).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="9" opacity="0.85" font-weight="600">${esc(envTxt)}</text>
-        <text x="${p.x.toFixed(1)}" y="${(p.y + 2).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">${esc(title.substring(0, 16))}</text>
-        <text x="${p.x.toFixed(1)}" y="${(p.y + 16).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="9" opacity="0.78">${esc(sub)}</text>
+        ${showEnv ? `<text x="${p.x.toFixed(1)}" y="${(p.y - 12).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="9" opacity="0.85" font-weight="600">${esc(envTxt)}</text>` : ""}
+        <text x="${p.x.toFixed(1)}" y="${(p.y + 2).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">${esc(title.substring(0, 14))}</text>
+        <text x="${p.x.toFixed(1)}" y="${(p.y + 15).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="9" opacity="0.78">${esc(sub)}</text>
       </g>`;
     }
   }
@@ -620,54 +632,9 @@ function renderHostedServicesSection(hostedServices, vpsService, vpsMetricsLine,
   </section>`;
 }
 
-function renderTopologySVG(sectionNodes, vpsService, vpsMetricsLine, vpsStatus) {
-  const W = 760, H = 360, cx = W/2, cy = H/2;
-  const roadColor = vpsStatus === "ok" ? "#22c55e" : vpsStatus === "warn" ? "#f59e0b" : "#ef4444";
-  const N = sectionNodes.length;
-  const radius = Math.min(W, H) / 2 - 70;
-
-  let svg = `<svg class="detail-topology" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
-
-  // 1) Carreteras radiales (debajo de los nodos)
-  const nodes = [];
-  for (let i = 0; i < N; i++) {
-    const ang = (2 * Math.PI * i) / N - Math.PI/2;
-    const x = cx + radius * Math.cos(ang);
-    const y = cy + radius * Math.sin(ang);
-    nodes.push({ ...sectionNodes[i], x, y });
-    svg += `<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="${roadColor}" stroke-width="4" stroke-linecap="round" opacity="0.85" />`;
-    svg += `<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="#ffffff" stroke-width="1" stroke-dasharray="5,5" opacity="0.55" />`;
-  }
-
-  // 2) VPS centro (ayuntamiento) — clickable → abre VPS drawer
-  svg += `<g class="topo-vps" data-action="open-svc" data-service-id="${esc(vpsService.id)}" style="cursor:pointer">
-    <rect x="${cx-66}" y="${cy-38}" width="132" height="76" rx="8" fill="#8b949e" stroke="#fff" stroke-width="2" />
-    <circle cx="${cx}" cy="${cy-38}" r="11" fill="#d4a017" />
-    <text x="${cx}" y="${cy-14}" text-anchor="middle" fill="#fff" font-size="11" font-weight="700" letter-spacing="1">VPS</text>
-    <text x="${cx}" y="${cy+4}" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">${esc((vpsService.name||"").substring(0,18))}</text>
-    <text x="${cx}" y="${cy+22}" text-anchor="middle" fill="#fff" font-size="10" opacity="0.85" font-family="monospace">${esc(vpsMetricsLine.substring(0,28))}</text>
-  </g>`;
-
-  // 3) Nodos de sección — clickable: scroll a su section-card
-  for (const n of nodes) {
-    svg += `<g class="topo-section-node" data-action="scroll-section" data-section-key="${esc(n.key)}" style="cursor:pointer">
-      <rect x="${(n.x-58).toFixed(1)}" y="${(n.y-28).toFixed(1)}" width="116" height="56" rx="6"
-            fill="${n.color}" stroke="#fff" stroke-width="1.5" opacity="0.95" />
-      <text x="${n.x.toFixed(1)}" y="${(n.y-4).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">${esc(n.label)}</text>
-      <text x="${n.x.toFixed(1)}" y="${(n.y+14).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="10" opacity="0.9">${n.count} ${n.count>1?"nodos":"nodo"}</text>
-    </g>`;
-  }
-
-  // 4) Caso vacío: solo VPS sin satélites
-  if (N === 0) {
-    svg += `<text x="${cx}" y="${cy+70}" text-anchor="middle" fill="#6e7681" font-size="11" font-style="italic">sin servicios alojados</text>`;
-  }
-
-  svg += `</svg>`;
-  return svg;
-}
-
-// (renderSectionCard eliminado — ver nota arriba)
+// (renderTopologySVG vieja F8.4 eliminada — la nueva F8.5 está arriba.
+//  Era la causa del bug "undefined / undefined nodo": sobrescribía la
+//  nueva por hoisting de function declarations.)
 
 // (renderUnifiedTile / renderSectionCard eliminados en F8.5: la vista detalle
 //  ya no muestra tarjetas debajo de la topología; toda la info se obtiene
