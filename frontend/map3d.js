@@ -181,6 +181,11 @@ function disposeGroup(group) {
       if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
       else obj.material.dispose();
     }
+    // F5 fix: CSS2DObject deja sus HTMLElements en el DOM al quitarlos de
+    // la escena (CSS2DRenderer no los limpia). Hay que removerlos a mano.
+    if (obj.element && typeof obj.element.remove === "function") {
+      obj.element.remove();
+    }
   });
 }
 
@@ -259,18 +264,14 @@ function buildCity(client, project, meta, worldPos) {
     labelDiv.appendChild(subDiv);
   }
 
-  // Zones
-  const zoneMap = new Map();
-  services.forEach((svc, idx) => {
-    const pos = svc.position && (svc.position.x || svc.position.z)
-      ? svc.position
-      : autoLayoutZone(idx, services.length);
-    const zone = buildZone(svc, pos, client, project);
-    zoneMap.set(svc.id, zone);
-    group.add(zone);
-  });
+  // Cluster mini (Fase 5): 1 central + hasta 4 secundarios + badge overflow
+  const cluster = buildCityCluster(services, client, project);
+  group.add(cluster);
 
-  // Cables
+  // Mapeo serviceId → mesh (sacado del cluster), para construir cables
+  const zoneMap = cluster.userData.serviceMeshMap;
+
+  // Cables intra-ciudad (igual lógica que F3 pero usando los meshes del cluster)
   const cableMap = new Map();
   for (const conn of meta.connections || []) {
     const a = zoneMap.get(conn.from);
@@ -1262,8 +1263,7 @@ buildInterior = function(client, project) {
     return g;
   }
 
-  // Agrupar por ROL (categoría semántica) en vez de por kind directo:
-  // así "infraestructura" agrupa vps + docker, "base de datos" agrupa postgres, etc.
+  // Agrupar por rol (mismo mapping kind→rol que F4)
   const byRole = new Map();
   for (const s of services) {
     const r = roleOf(s.kind);
@@ -1271,91 +1271,86 @@ buildInterior = function(client, project) {
     byRole.get(r).push(s);
   }
 
-  const barrioRoles = [...byRole.keys()];
-  const N = barrioRoles.length;
-
-  // Mapa serviceId → mesh global (para que los cables del Task 5 puedan encontrarlos)
+  // Mapa serviceId → mesh global (cables se construyen al final)
   const interiorZoneMeshes = new Map();
   g.userData.interiorZoneMeshes = interiorZoneMeshes;
 
-  barrioRoles.forEach((role, idx) => {
-    const barrio = new THREE.Group();
-    barrio.userData = { type: "barrio", role };
+  // === PLAZA CENTRAL ============================================== //
+  const infraServices = byRole.get("infraestructura") || [];
+  const ayuntamiento = firstVps(infraServices);
+  const infraOthers = infraServices.filter(s => !ayuntamiento || s.id !== ayuntamiento.id);
 
-    // Posición polar (N=1: centro)
-    if (N === 1) {
-      barrio.position.set(0, 0, 0);
-    } else {
-      const angle = (2 * Math.PI * idx) / N;
-      barrio.position.set(
-        BARRIO_RADIUS_SLOT * Math.cos(angle),
-        0,
-        BARRIO_RADIUS_SLOT * Math.sin(angle)
-      );
-    }
+  if (ayuntamiento) {
+    const mesh = buildBuilding(ayuntamiento.kind);
+    mesh.scale.setScalar(COMPONENT_SCALE);
+    mesh.position.set(0, 0, 0);
+    mesh.userData = { type: "zone", service: ayuntamiento, client, project, inInterior: true };
+    g.add(mesh);
+    interiorZoneMeshes.set(ayuntamiento.id, mesh);
+    addZoneLabel(mesh, ayuntamiento);
 
-    // Footprint del barrio: color del ROL
-    const roleColor = ROLE_COLORS[role] || ROLE_COLORS["otros"];
-    const footprintGeo = new THREE.CircleGeometry(BARRIO_FOOTPRINT_R, 32);
-    const footprintMat = new THREE.MeshBasicMaterial({
-      color: roleColor, opacity: 0.25, transparent: true, side: THREE.DoubleSide,
-    });
-    const footprint = new THREE.Mesh(footprintGeo, footprintMat);
-    footprint.rotation.x = -Math.PI / 2;
-    footprint.position.y = 0.02;
-    footprint.userData = { type: "barrio-footprint", role };
-    barrio.add(footprint);
+    // Label "plaza · ayuntamiento" arriba (alto fijo)
+    const plazaDiv = document.createElement("div");
+    plazaDiv.className = "barrio-label";
+    plazaDiv.textContent = "plaza · ayuntamiento";
+    const plazaLbl = new CSS2DObject(plazaDiv);
+    plazaLbl.position.set(0, 7, 0);
+    g.add(plazaLbl);
+  } else {
+    // Edge case: proyecto sin VPS
+    const noayuntDiv = document.createElement("div");
+    noayuntDiv.className = "barrio-label";
+    noayuntDiv.textContent = "sin ayuntamiento";
+    const lbl = new CSS2DObject(noayuntDiv);
+    lbl.position.set(0, 1, 0);
+    g.add(lbl);
+  }
 
-    // Label del barrio: nombre del ROL
-    const lblDiv = document.createElement("div");
-    lblDiv.className = "barrio-label";
-    lblDiv.textContent = `barrio ${role}`;
-    const barrioLabel = new CSS2DObject(lblDiv);
-    barrioLabel.position.set(0, 0.5, 0);
-    barrio.add(barrioLabel);
-
-    // Componentes (zonas) dentro del barrio — cada uno usa SU propia primitiva
-    // y color del KIND (así dentro del barrio sigues distinguiendo tipos)
-    const items = byRole.get(role);
-    const M = items.length;
-    items.forEach((svc, i) => {
-      const angle = (2 * Math.PI * i) / Math.max(M, 3);
-      const lx = COMPONENT_RADIUS * Math.cos(angle);
-      const lz = COMPONENT_RADIUS * Math.sin(angle);
-
-      const geoFactory = ZONE_PRIMITIVES[svc.kind] || ZONE_PRIMITIVES.custom;
-      const geo = geoFactory();
-      const kindColor = ZONE_COLORS[svc.kind] || ZONE_COLORS.custom;
-      const mat = new THREE.MeshStandardMaterial({ color: kindColor });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.scale.set(COMPONENT_SCALE, COMPONENT_SCALE, COMPONENT_SCALE);
-      mesh.position.set(lx, ZONE_Y * COMPONENT_SCALE, lz);
-      mesh.userData = {
-        type: "zone",
-        service: svc,
-        client, project,
-        inInterior: true,
-      };
-      barrio.add(mesh);
-      interiorZoneMeshes.set(svc.id, mesh);
-
-      // Label CSS2D con dot de estado
-      const m = mockMetrics.get(svc.id);
-      const statusCls = m ? `status-${m.status}` : "status-ok";
-      const zlbl = document.createElement("div");
-      zlbl.className = "zone-label";
-      zlbl.dataset.serviceId = svc.id;
-      zlbl.innerHTML = `<span class="status-dot ${statusCls}"></span><span>${escapeHtml(svc.name)} <span style="color:var(--muted);font-size:10px">[${escapeHtml(svc.kind)}]</span></span>`;
-      const label = new CSS2DObject(zlbl);
-      label.position.set(0, 2.2, 0);
-      mesh.add(label);
-    });
-
-    g.add(barrio);
+  // VPSs adicionales + dockers alrededor del ayuntamiento (radio PLAZA_RADIUS)
+  const M = infraOthers.length;
+  infraOthers.forEach((svc, i) => {
+    const angle = (2 * Math.PI * i) / Math.max(M, 3);
+    const x = PLAZA_RADIUS * Math.cos(angle);
+    const z = PLAZA_RADIUS * Math.sin(angle);
+    const mesh = buildBuilding(svc.kind);
+    mesh.scale.setScalar(COMPONENT_SCALE);
+    mesh.position.set(x, 0, z);
+    mesh.userData = { type: "zone", service: svc, client, project, inInterior: true };
+    g.add(mesh);
+    interiorZoneMeshes.set(svc.id, mesh);
+    addZoneLabel(mesh, svc);
   });
 
-  // (cables abajo)
-  // Cables (intra-ciudad) renderizados como carreteras (tubo asfalto + dashed encima)
+  // === BARRIOS NO-INFRA: CALLES RADIALES ========================== //
+  const otherRoles = [...byRole.keys()].filter(r => r !== "infraestructura");
+  const Nstreets = otherRoles.length;
+  otherRoles.forEach((role, idx) => {
+    const angle = (2 * Math.PI * idx) / Math.max(Nstreets, 1);
+    const streetGroup = buildStreet(angle, role);
+
+    const items = byRole.get(role);
+    items.forEach((svc, i) => {
+      const side = i % 2 === 0 ? 1 : -1;       // alternar lados
+      const slot = Math.floor(i / 2);
+      const localX = side * 1.6;
+      const localZ = STREET_RADIUS_START + 1 + slot * 2;
+
+      const mesh = buildBuilding(svc.kind);
+      mesh.scale.setScalar(COMPONENT_SCALE);
+      mesh.position.set(localX, 0, localZ);
+      mesh.userData = { type: "zone", service: svc, client, project, inInterior: true };
+      streetGroup.add(mesh);
+      addZoneLabel(mesh, svc);
+
+      // Aún dentro de streetGroup rotado, getWorldPosition funcionará bien
+      // cuando construyamos los cables al final.
+      interiorZoneMeshes.set(svc.id, mesh);
+    });
+
+    g.add(streetGroup);
+  });
+
+  // === CABLES INTRA-CIUDAD ======================================== //
   const connections = cityRec && cityRec.projectMeta && cityRec.projectMeta.connections
     ? cityRec.projectMeta.connections
     : [];
@@ -1364,7 +1359,6 @@ buildInterior = function(client, project) {
     const to   = interiorZoneMeshes.get(conn.to);
     if (!from || !to) continue;
 
-    // Posiciones en coords mundo (cada mesh está dentro de su barrio Group)
     const p0 = new THREE.Vector3();
     const p1 = new THREE.Vector3();
     from.getWorldPosition(p0);
@@ -1372,19 +1366,16 @@ buildInterior = function(client, project) {
     p0.y = ZONE_Y * 0.6;
     p1.y = ZONE_Y * 0.6;
 
-    // Curva suave entre los dos puntos
     const mid = new THREE.Vector3().addVectors(p0, p1).multiplyScalar(0.5);
     mid.y = ZONE_Y * 0.65;
     const curve = new THREE.CatmullRomCurve3([p0, mid, p1]);
 
-    // Tubo asfalto
     const tubeGeo = new THREE.TubeGeometry(curve, 24, 0.18, 8, false);
     const tubeMat = new THREE.MeshBasicMaterial({ color: 0x333740 });
     const tube = new THREE.Mesh(tubeGeo, tubeMat);
     tube.userData = { type: "interior-road-asphalt", connection: conn };
     g.add(tube);
 
-    // Líneas blancas dashed encima
     const segments = 48;
     const pts = [];
     for (let i = 0; i <= segments; i++) {
@@ -1394,10 +1385,7 @@ buildInterior = function(client, project) {
     }
     const lineGeo = new THREE.BufferGeometry().setFromPoints(pts);
     const lineMat = new THREE.LineDashedMaterial({
-      color: 0xffffff,
-      dashSize: 0.5,
-      gapSize: 0.5,
-      linewidth: 1,
+      color: 0xffffff, dashSize: 0.5, gapSize: 0.5, linewidth: 1,
     });
     const line = new THREE.Line(lineGeo, lineMat);
     line.computeLineDistances();
@@ -1467,3 +1455,219 @@ refreshOpenPanelMetrics = function() {
   updateBar('[data-metric-bar="ram"]',  Math.round(m.ram));
   updateBar('[data-metric-bar="disk"]', Math.round(m.disk));
 };
+
+// ============================================================ //
+// Fase 5 — Edificios temáticos + star topology + mini-ciudades  //
+// ============================================================ //
+
+// Constantes de layout
+const STREET_LENGTH        = 8;        // longitud de cada calle radial
+const STREET_RADIUS_START  = 6;        // donde empieza la calle (fuera de la plaza)
+const STREET_WIDTH         = 1.2;
+const PLAZA_RADIUS         = 3.5;      // radio para VPSs/dockers adicionales alrededor del ayuntamiento
+const CITY_CLUSTER_CENTRAL_SCALE   = 0.5;
+const CITY_CLUSTER_SECONDARY_SCALE = 0.4;
+const CITY_CLUSTER_MAX     = 5;        // edificios visibles en world cluster
+
+// Recetas de edificios (composición declarativa de primitivas Three.js)
+// Cada pieza: {geo: [type, ...args], color: hex, y, x?, z?, rotY?}
+const BUILDING_RECIPES = {
+  vps: [
+    { geo: ["box", 3, 1.5, 3],          color: 0x8b949e, y: 0.75 },              // base
+    { geo: ["cone", 2.2, 0.8, 4],       color: 0x5c6470, y: 1.9 },               // tejado dos aguas
+    { geo: ["cyl", 0.6, 0.6, 1.5, 12],  color: 0xa1a8b3, y: 2.75 },              // torre
+    { geo: ["spheredome", 0.7, 12, 6],  color: 0xd4a017, y: 3.5 },               // cúpula dorada
+  ],
+  n8n: [
+    { geo: ["box", 1.5, 4, 1.5],        color: 0xa371f7, y: 2 },                 // torre
+    { geo: ["box", 1.6, 0.1, 1.6],      color: 0x5e3eb5, y: 4.05 },              // tejado plano
+    { geo: ["box", 0.05, 3.5, 0.05],    color: 0xe6d4ff, y: 2, x: 0.76 },        // franja ventanas +X
+    { geo: ["box", 0.05, 3.5, 0.05],    color: 0xe6d4ff, y: 2, x: -0.76 },       // franja ventanas -X
+    { geo: ["box", 0.05, 3.5, 0.05],    color: 0xe6d4ff, y: 2, z: 0.76 },        // franja ventanas +Z
+  ],
+  docker: [
+    { geo: ["box", 3, 1, 2],            color: 0x2496ed, y: 0.5 },               // base almacén
+    { geo: ["box", 0.6, 0.6, 0.6],      color: 0xff5733, y: 1.3, x: -0.8 },      // contenedor rojo
+    { geo: ["box", 0.6, 0.6, 0.6],      color: 0xffc300, y: 1.3, x: 0 },         // contenedor amarillo
+    { geo: ["box", 0.6, 0.6, 0.6],      color: 0x2196f3, y: 1.9, x: -0.4 },      // contenedor azul (encima)
+  ],
+  chatwoot: [
+    { geo: ["cyl", 0.5, 0.7, 3, 12],    color: 0xf48120, y: 1.5 },               // torre cónica
+    { geo: ["cyl", 0.05, 0.05, 1, 6],   color: 0x888888, y: 3.5 },               // antena
+    { geo: ["sphere", 0.1, 8, 8],       color: 0xff0000, y: 4.05 },              // LED rojo
+  ],
+  postgres: [
+    { geo: ["box", 2.5, 1.8, 1.5],      color: 0x336791, y: 0.9 },               // cuerpo
+    { geo: ["cyl", 0.15, 0.15, 1.8, 8], color: 0xeeeeee, y: 0.9, x: -0.9, z: 0.7 },  // col 1
+    { geo: ["cyl", 0.15, 0.15, 1.8, 8], color: 0xeeeeee, y: 0.9, x: -0.3, z: 0.7 },  // col 2
+    { geo: ["cyl", 0.15, 0.15, 1.8, 8], color: 0xeeeeee, y: 0.9, x: 0.3, z: 0.7 },   // col 3
+    { geo: ["cyl", 0.15, 0.15, 1.8, 8], color: 0xeeeeee, y: 0.9, x: 0.9, z: 0.7 },   // col 4
+    { geo: ["box", 2.7, 0.2, 1.7],      color: 0x1f4868, y: 1.9 },               // tejado plano
+    { geo: ["box", 2.2, 0.15, 0.4],     color: 0x666666, y: 0.075, z: 0.9 },     // escalera
+  ],
+  github: [
+    { geo: ["box", 2.5, 1.5, 2],        color: 0xe6edf3, y: 0.75 },              // cuerpo
+    { geo: ["spheredome", 1.4, 16, 8],  color: 0xe6edf3, y: 1.5 },               // cúpula curva
+    { geo: ["box", 0.6, 1.1, 0.1],      color: 0x333333, y: 0.55, z: 1.0 },      // entrada
+  ],
+  linear: [
+    { geo: ["cyl", 1.0, 1.0, 2.5, 5],   color: 0x5e6ad2, y: 1.25 },              // prisma pentagonal
+    { geo: ["cyl", 1.05, 1.05, 0.1, 5], color: 0x3e4a8f, y: 2.55 },              // tejado pentagonal
+  ],
+  custom: [
+    { geo: ["box", 1.5, 1.5, 1.5],      color: 0x6e7681, y: 0.75 },              // cuerpo
+    { geo: ["cone", 1.2, 1, 4],         color: 0x4a505a, y: 2 },                 // tejado
+  ],
+};
+
+function buildGeo(spec) {
+  const [type, ...args] = spec;
+  if (type === "box")        return new THREE.BoxGeometry(...args);
+  if (type === "cone")       return new THREE.ConeGeometry(...args);
+  if (type === "cyl")        return new THREE.CylinderGeometry(...args);
+  if (type === "sphere")     return new THREE.SphereGeometry(...args);
+  if (type === "spheredome") {
+    // Hemisferio superior con base plana abajo
+    return new THREE.SphereGeometry(args[0], args[1], args[2], 0, Math.PI * 2, 0, Math.PI / 2);
+  }
+  if (type === "circle")     return new THREE.CircleGeometry(...args);
+  throw new Error(`Unknown geo type: ${type}`);
+}
+
+function buildBuilding(kind) {
+  const recipe = BUILDING_RECIPES[kind] || BUILDING_RECIPES.custom;
+  const group = new THREE.Group();
+  group.userData = { type: "building", kind };
+  for (const p of recipe) {
+    const geo = buildGeo(p.geo);
+    const mat = new THREE.MeshStandardMaterial({ color: p.color });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(p.x || 0, p.y, p.z || 0);
+    if (p.rotY) mesh.rotation.y = p.rotY;
+    group.add(mesh);
+  }
+  return group;
+}
+
+// Helper: primer servicio con kind=vps por orden de id (estable por sesión).
+// Devuelve null si no hay ningún VPS.
+function firstVps(services) {
+  return [...services]
+    .filter(s => s && s.kind === "vps")
+    .sort((a, b) => (a.id || "").localeCompare(b.id || ""))[0] || null;
+}
+
+// Construye un cluster mini para el world view de una ciudad:
+// 1 edificio central (ayuntamiento o primer servicio) + hasta 4 secundarios + badge "+N más".
+// Devuelve un THREE.Group con userData.serviceMeshMap = Map<serviceId, mesh>
+// para que buildCity pueda construir cables después.
+function buildCityCluster(services, client, project) {
+  const cluster = new THREE.Group();
+  const serviceMeshMap = new Map();
+  cluster.userData = { type: "city-cluster", client, project, serviceMeshMap };
+  if (!services || services.length === 0) return cluster;
+
+  // Central: ayuntamiento (primer VPS) o, si no hay VPS, el primer servicio
+  const central = firstVps(services) || services[0];
+
+  // Resto, hasta CITY_CLUSTER_MAX - 1 secundarios
+  const rest = services.filter(s => s.id !== central.id);
+  const visible = rest.slice(0, CITY_CLUSTER_MAX - 1);
+  const overflow = services.length - 1 - visible.length;
+
+  // Construir central
+  const centralMesh = buildBuilding(central.kind);
+  centralMesh.scale.setScalar(CITY_CLUSTER_CENTRAL_SCALE);
+  centralMesh.position.set(0, 0.15, 0);  // sobre el footprint (que tiene y=0.08)
+  centralMesh.userData = { type: "zone", service: central, client, project };
+  cluster.add(centralMesh);
+  serviceMeshMap.set(central.id, centralMesh);
+
+  // Offsets fijos para los 4 secundarios (esquinas de un cuadrado)
+  const offsets = [
+    { x:  2.5, z:  2.5 },
+    { x: -2.5, z:  2.5 },
+    { x:  2.5, z: -2.5 },
+    { x: -2.5, z: -2.5 },
+  ];
+  visible.forEach((svc, i) => {
+    const mesh = buildBuilding(svc.kind);
+    mesh.scale.setScalar(CITY_CLUSTER_SECONDARY_SCALE);
+    const o = offsets[i] || { x: 0, z: 0 };
+    mesh.position.set(o.x, 0.15, o.z);
+    mesh.userData = { type: "zone", service: svc, client, project };
+    cluster.add(mesh);
+    serviceMeshMap.set(svc.id, mesh);
+  });
+
+  // Badge "+N más" CSS2D si hay overflow
+  if (overflow > 0) {
+    const badgeDiv = document.createElement("div");
+    badgeDiv.className = "cluster-more-badge";
+    badgeDiv.textContent = "+" + overflow + " más";
+    const badge = new CSS2DObject(badgeDiv);
+    badge.position.set(0, 3, 0);
+    cluster.add(badge);
+  }
+
+  return cluster;
+}
+
+// Construye una "calle" radial: asfalto plano + líneas blancas dashed + label CSS2D.
+// La calle se construye apuntando hacia +Z y luego se rota por `angle` rad alrededor de Y
+// para apuntar al barrio correspondiente. `label` es el nombre del barrio (rol).
+function buildStreet(angle, label) {
+  const group = new THREE.Group();
+  group.userData = { type: "interior-street", barrio: label };
+
+  // Asfalto (BoxGeometry plano, eje principal Z)
+  const asphalt = new THREE.Mesh(
+    new THREE.BoxGeometry(STREET_WIDTH, 0.05, STREET_LENGTH),
+    new THREE.MeshBasicMaterial({ color: 0x333740 })
+  );
+  asphalt.position.set(0, 0.04, STREET_RADIUS_START + STREET_LENGTH / 2);
+  group.add(asphalt);
+
+  // Línea blanca dashed centrada a lo largo de la calle
+  const segments = 16;
+  const pts = [];
+  for (let i = 0; i <= segments; i++) {
+    const z = STREET_RADIUS_START + (i * STREET_LENGTH / segments);
+    pts.push(new THREE.Vector3(0, 0.08, z));
+  }
+  const lineGeo = new THREE.BufferGeometry().setFromPoints(pts);
+  const lineMat = new THREE.LineDashedMaterial({
+    color: 0xffffff, dashSize: 0.3, gapSize: 0.3, linewidth: 1,
+  });
+  const line = new THREE.Line(lineGeo, lineMat);
+  line.computeLineDistances();
+  group.add(line);
+
+  // Label al inicio de la calle (cerca de la plaza)
+  if (label) {
+    const lblDiv = document.createElement("div");
+    lblDiv.className = "street-label";
+    lblDiv.textContent = "calle " + label;
+    const lbl = new CSS2DObject(lblDiv);
+    lbl.position.set(0, 0.8, STREET_RADIUS_START + 0.5);
+    group.add(lbl);
+  }
+
+  group.rotation.y = angle;
+  return group;
+}
+
+// Helper compartido: añade label CSS2D con dot de estado al mesh del componente.
+function addZoneLabel(mesh, svc) {
+  const m = mockMetrics.get(svc.id);
+  const statusCls = m ? `status-${m.status}` : "status-ok";
+  const zlbl = document.createElement("div");
+  zlbl.className = "zone-label";
+  zlbl.dataset.serviceId = svc.id;
+  zlbl.innerHTML = `<span class="status-dot ${statusCls}"></span><span>${escapeHtml(svc.name)} <span style="color:var(--muted);font-size:10px">[${escapeHtml(svc.kind)}]</span></span>`;
+  const label = new CSS2DObject(zlbl);
+  // Y fija en coords locales del mesh (escalado por COMPONENT_SCALE=2 → ~5 unidades en mundo)
+  // Suficiente para que la label quede por encima de todos los edificios temáticos.
+  label.position.set(0, 5, 0);
+  mesh.add(label);
+}

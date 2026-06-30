@@ -359,12 +359,16 @@ def load_project_meta(c: str, p: str) -> dict:
     data.setdefault("version", 1)
     data.setdefault("services", [])
     data.setdefault("connections", [])
-    # Fase 3 defaults — backwards-compat con v1
+    # Fase 3/5 defaults — backwards-compat con v1/v2
     if "world_position" not in data or not isinstance(data["world_position"], dict):
         data["world_position"] = {"x": 0.0, "z": 0.0}
     for s in data["services"]:
-        if isinstance(s, dict) and ("position" not in s or not isinstance(s["position"], dict)):
+        if not isinstance(s, dict):
+            continue
+        if "position" not in s or not isinstance(s["position"], dict):
             s["position"] = {"x": 0.0, "z": 0.0}
+        if "interior_position" not in s or not isinstance(s["interior_position"], dict):
+            s["interior_position"] = {"x": 0.0, "z": 0.0}
     return data
 
 
@@ -482,6 +486,19 @@ def validate_meta_payload(payload: dict) -> tuple[dict | None, str]:
             position = {"x": float(px), "z": float(pz)}
         else:
             position = {"x": 0.0, "z": 0.0}
+        # interior_position (Fase 5) — opcional, {x, z} en rango más acotado [-50, 50]
+        ipos_in = s.get("interior_position")
+        if ipos_in is not None:
+            if not isinstance(ipos_in, dict):
+                return None, f"servicio {i}: interior_position debe ser objeto {{x, z}}"
+            ipx, ipz = ipos_in.get("x"), ipos_in.get("z")
+            if not (isinstance(ipx, (int, float)) and isinstance(ipz, (int, float))):
+                return None, f"servicio {i}: interior_position.x y interior_position.z deben ser números"
+            if not (-50 <= ipx <= 50 and -50 <= ipz <= 50):
+                return None, f"servicio {i}: interior_position fuera de rango [-50, 50]"
+            interior_position = {"x": float(ipx), "z": float(ipz)}
+        else:
+            interior_position = {"x": 0.0, "z": 0.0}
         sid = s.get("id") or _new_id(kind)
         if sid in seen_svc_ids:
             return None, f"servicio {i}: id duplicado '{sid}'"
@@ -490,6 +507,7 @@ def validate_meta_payload(payload: dict) -> tuple[dict | None, str]:
             "id": sid, "kind": kind, "name": name.strip(),
             "config": cfg if cfg is not None else {},
             "position": position,
+            "interior_position": interior_position,
         })
 
     seen_conn_ids: set[str] = set()
@@ -514,7 +532,7 @@ def validate_meta_payload(payload: dict) -> tuple[dict | None, str]:
         out_connections.append({"id": cid, "from": f, "to": t, "label": label})
 
     return {
-        "version": 2,
+        "version": 3,
         "world_position": world_position,
         "services": out_services,
         "connections": out_connections,
