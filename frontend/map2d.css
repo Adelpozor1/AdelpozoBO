@@ -142,3 +142,14 @@
 }
 
 .vps-actions .btn { font-size: 12px; padding: 4px 10px; }
+
+/* Mini-mapa SVG dentro de la tarjeta VPS: VPS centro + carreteras + edificios */
+.vps-mini-map {
+  display: block;
+  width: 100%;
+  height: 180px;
+  margin-top: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}

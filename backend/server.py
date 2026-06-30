@@ -1032,7 +1032,8 @@ def check_vps_health(vps_service: dict) -> dict:
         "ssh_host": cfg.get("host", ""),
         "ssh_user": cfg.get("user", ""),
         "ssh_port": cfg.get("port", 22),
-        "ssh_key":  cfg.get("ssh_key", ""),
+        "ssh_key":  cfg.get("ssh_key", ""),     # legacy, no usado por ssh_run
+        "identity_file": cfg.get("ssh_key", ""), # ← nombre que ssh_run espera
     }
     ts = time.time()
     if not host["ssh_host"] or not host["ssh_user"]:
