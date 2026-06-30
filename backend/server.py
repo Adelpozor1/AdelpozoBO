@@ -531,8 +531,22 @@ def validate_meta_payload(payload: dict) -> tuple[dict | None, str]:
         seen_conn_ids.add(cid)
         out_connections.append({"id": cid, "from": f, "to": t, "label": label})
 
+    # Validación cruzada Fase 6: on_host y satellites_of deben referenciar
+    # un id de service con kind=vps presente en el mismo payload
+    vps_ids = {s["id"] for s in out_services if s["kind"] == "vps"}
+    for i, s in enumerate(out_services):
+        cfg = s.get("config", {})
+        if not isinstance(cfg, dict):
+            continue
+        if "on_host" in cfg:
+            if not isinstance(cfg["on_host"], str) or cfg["on_host"] not in vps_ids:
+                return None, f"servicio {i}: on_host '{cfg.get('on_host')}' no es una VPS del proyecto"
+        if "satellites_of" in cfg:
+            if not isinstance(cfg["satellites_of"], str) or cfg["satellites_of"] not in vps_ids:
+                return None, f"servicio {i}: satellites_of '{cfg.get('satellites_of')}' no es una VPS del proyecto"
+
     return {
-        "version": 3,
+        "version": 4,
         "world_position": world_position,
         "services": out_services,
         "connections": out_connections,
@@ -999,6 +1013,78 @@ def parse_report(raw: str, host: dict) -> dict:
     return {"system": system, "docker": _docker(sec), "n8n": _n8n(sec), "db": _db(sec)}
 
 
+# ============================================================ #
+# Fase 6 — Health polling de VPSs                               #
+# ============================================================ #
+HEALTH_CACHE = {}              # vps_id → {"ts", "status", "metrics", "error"}
+HEALTH_LOCK = threading.Lock()
+HEALTH_POLL_INTERVAL = 30      # segundos
+HEALTH_TIMEOUT = 15            # SSH timeout por VPS
+
+
+def check_vps_health(vps_service: dict) -> dict:
+    """Chequea una VPS por SSH (reusa ssh_run + build_collector + parse_report).
+    Devuelve {ts, status, metrics, error}. status ∈ {"ok","warn","down"}."""
+    cfg = vps_service.get("config") or {}
+    host = {
+        "id": vps_service["id"],
+        "name": vps_service["name"],
+        "ssh_host": cfg.get("host", ""),
+        "ssh_user": cfg.get("user", ""),
+        "ssh_port": cfg.get("port", 22),
+        "ssh_key":  cfg.get("ssh_key", ""),
+    }
+    ts = time.time()
+    if not host["ssh_host"] or not host["ssh_user"]:
+        return {"ts": ts, "status": "down", "metrics": None,
+                "error": "ssh_host/ssh_user no configurados"}
+    code, raw, err = ssh_run(host, build_collector(host), timeout=HEALTH_TIMEOUT)
+    if code != 0:
+        msg = (err or "").strip()[:200] or f"SSH exit {code}"
+        return {"ts": ts, "status": "down", "metrics": None, "error": msg}
+    parsed = parse_report(raw, host)
+    sys_block = parsed.get("system", {}) or {}
+    cpu = sys_block.get("cpu_pct") or 0
+    mem = sys_block.get("mem", {}) or {}
+    ram = mem.get("pct") or 0
+    disks = sys_block.get("disk", []) or []
+    max_disk = max((d.get("pct", 0) or 0 for d in disks), default=0)
+    status = "warn" if (cpu > 90 or ram > 90 or max_disk > 90) else "ok"
+    return {"ts": ts, "status": status, "metrics": {
+        "cpu_pct": cpu,
+        "ram_pct": ram,
+        "disk_pct_max": max_disk,
+        "uptime_s": sys_block.get("uptime", 0),
+    }, "error": None}
+
+
+def health_poll_loop():
+    """Daemon thread que cada HEALTH_POLL_INTERVAL segundos chequea todas las
+    VPSs declaradas en cualquier proyecto y actualiza HEALTH_CACHE."""
+    print(f"[health-poll] daemon iniciado (intervalo {HEALTH_POLL_INTERVAL}s)")
+    while True:
+        try:
+            for client_dir in PROJECTS.iterdir():
+                if not client_dir.is_dir() or not valid_name(client_dir.name):
+                    continue
+                for proj_dir in client_dir.iterdir():
+                    if not proj_dir.is_dir() or not valid_name(proj_dir.name):
+                        continue
+                    try:
+                        meta = load_project_meta(client_dir.name, proj_dir.name)
+                    except ValueError:
+                        continue
+                    for s in meta.get("services", []):
+                        if s.get("kind") != "vps":
+                            continue
+                        entry = check_vps_health(s)
+                        with HEALTH_LOCK:
+                            HEALTH_CACHE[s["id"]] = entry
+        except Exception as e:
+            print(f"[health-poll] error: {e}")
+        time.sleep(HEALTH_POLL_INTERVAL)
+
+
 # --------------------------------------------------------------------------- #
 # Handler
 # --------------------------------------------------------------------------- #
@@ -1067,7 +1153,8 @@ class Handler(BaseHTTPRequestHandler):
                 resp["linear_token_set"] = bool(read_linear_token())
             self._json(200, resp)
         elif path in ("/api/clients", "/api/projects", "/api/repos",
-                      "/api/repos/branches", "/api/projects/meta", "/api/world"):
+                      "/api/repos/branches", "/api/projects/meta", "/api/world",
+                      "/api/projects/health"):
             if not self._is_authed():
                 return self._json(401, {"error": "no autorizado"})
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -1081,6 +1168,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._proj_meta_get(q.get("client", [""])[0], q.get("project", [""])[0])
             elif path == "/api/world":
                 self._world_get()
+            elif path == "/api/projects/health":
+                self._projects_health(q.get("client", [""])[0], q.get("project", [""])[0])
             else:
                 self._repo_branches(q.get("client", [""])[0], q.get("project", [""])[0],
                                     q.get("name", [""])[0])
@@ -1393,6 +1482,35 @@ class Handler(BaseHTTPRequestHandler):
                 })
             out_clients.append({"name": cname, "projects": projs})
         self._json(200, {"clients": out_clients})
+
+    def _projects_health(self, c: str, p: str):
+        """Devuelve {vps_id: {ts, status, metrics, error}} para todas las VPSs
+        del proyecto solicitado. Lee del HEALTH_CACHE alimentado por el daemon
+        health_poll_loop (Fase 6/7)."""
+        if not valid_name(c) or not valid_name(p):
+            return self._json(400, {"error": "nombres no válidos"})
+        if safe_join(c, p) is None:
+            return self._json(404, {"error": "proyecto no existe"})
+        try:
+            with project_lock(f"{c}/{p}"):
+                meta = load_project_meta(c, p)
+        except ValueError as e:
+            return self._json(500, {"error": str(e)})
+        out = {}
+        with HEALTH_LOCK:
+            for s in meta.get("services", []):
+                if s.get("kind") != "vps":
+                    continue
+                vid = s.get("id")
+                if not vid:
+                    continue
+                entry = HEALTH_CACHE.get(vid)
+                if entry is None:
+                    out[vid] = {"ts": 0, "status": "down", "metrics": None,
+                                "error": "sin datos (polling aún no ha corrido)"}
+                else:
+                    out[vid] = entry
+        self._json(200, out)
 
     def _proj_meta_save(self):
         """Reemplaza la metadata del proyecto entera (servicios + conexiones).
@@ -2000,6 +2118,8 @@ def main():
     print("=" * 60)
     if CFG.get("totp_enabled") and not CFG.get("password_hash"):
         print_enrollment(CFG)
+    # Daemon de polling de salud de VPSs (Fase 6/7)
+    threading.Thread(target=health_poll_loop, daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

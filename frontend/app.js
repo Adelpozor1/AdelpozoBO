@@ -138,7 +138,7 @@ $("#newClientBtn").onclick = async () => {
   const r = await fetch("/api/clients/create", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name}) });
   if (r.ok) {
     loadClients();
-    if (map3dApi && map3dApi.loadWorld) map3dApi.loadWorld();
+    if (typeof window.refreshMap2D === "function") window.refreshMap2D();
   }
   else { const j = await r.json().catch(() => ({})); alert(j.error || "No se pudo crear"); }
 };
@@ -147,7 +147,7 @@ async function delClient(name) {
   const r = await fetch("/api/clients/delete", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name}) });
   if (r.ok) {
     loadClients();
-    if (map3dApi && map3dApi.loadWorld) map3dApi.loadWorld();
+    if (typeof window.refreshMap2D === "function") window.refreshMap2D();
   } else alert("No se pudo borrar");
 }
 async function renameClient(name) {
@@ -157,7 +157,7 @@ async function renameClient(name) {
   if (r.ok) {
     if (selClient === name) { selClient = nn; localStorage.setItem("lastClient", nn); }
     loadClients();
-    if (map3dApi && map3dApi.loadWorld) map3dApi.loadWorld();
+    if (typeof window.refreshMap2D === "function") window.refreshMap2D();
   }
   else { const j = await r.json().catch(() => ({})); alert(j.error || "No se pudo renombrar"); }
 }
@@ -196,7 +196,7 @@ $("#newProjectBtn").onclick = async () => {
   const r = await fetch("/api/projects/create", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({client: selClient, name}) });
   if (r.ok) {
     loadProjects();
-    if (map3dApi && map3dApi.loadWorld) map3dApi.loadWorld();
+    if (typeof window.refreshMap2D === "function") window.refreshMap2D();
   }
   else { const j = await r.json().catch(() => ({})); alert(j.error || "No se pudo crear"); }
 };
@@ -205,7 +205,7 @@ async function delProject(name) {
   const r = await fetch("/api/projects/delete", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({client: selClient, name}) });
   if (r.ok) {
     loadProjects();
-    if (map3dApi && map3dApi.loadWorld) map3dApi.loadWorld();
+    if (typeof window.refreshMap2D === "function") window.refreshMap2D();
   } else alert("No se pudo borrar");
 }
 async function renameProject(name) {
@@ -215,7 +215,7 @@ async function renameProject(name) {
   if (r.ok) {
     if (selProject === name) { selProject = nn; localStorage.setItem("lastProject", nn); }
     loadProjects();
-    if (map3dApi && map3dApi.loadWorld) map3dApi.loadWorld();
+    if (typeof window.refreshMap2D === "function") window.refreshMap2D();
   }
   else { const j = await r.json().catch(() => ({})); alert(j.error || "No se pudo renombrar"); }
 }
@@ -1215,22 +1215,15 @@ function when(iso) {
 $("#linearRefresh").onclick = () => { linearLoaded = false; linearFetch(); };
 
 // --------------------------------------------------------------------------- //
-// Mapa 3D (Fase 3): lazy import de Three.js solo cuando se abre la pestaña.
+// Mapa 2D (Fase 7): vista simple en grid de tarjetas HTML/CSS, sin libs.
+// El script map2d.js se carga como global antes que app.js (ver index.html).
 // --------------------------------------------------------------------------- //
-let map3dApi = null;
 async function mapEnter() {
-  const host = $("#map-home");
-  if (!map3dApi) {
-    try {
-      const mod = await import("/static/map3d.js");
-      map3dApi = mod;
-    } catch (e) {
-      console.error("No se pudo cargar map3d.js:", e);
-      host.innerHTML = '<div style="padding:20px;color:#ef4444">No se pudo cargar el mapa: ' + esc(e.message) + '</div>';
-      return;
-    }
+  if (typeof window.initMap2D === "function") {
+    window.initMap2D();
+  } else {
+    console.error("map2d.js no se ha cargado");
   }
-  map3dApi.initMap3D(host);
 }
 
 checkAuth();
