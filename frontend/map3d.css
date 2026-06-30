@@ -1,0 +1,219 @@
+/* Contenedor del mapa 3D (Fase 3) */
+#map-home {
+  position: relative;
+  width: 100%;
+  height: calc(100vh - 64px);    /* alto total menos header */
+  overflow: hidden;
+  background: #0d1117;
+}
+
+#mapCanvasWrap {
+  position: absolute;
+  inset: 0;
+}
+
+#mapCanvasWrap canvas {
+  display: block;
+}
+
+/* HUD top-right */
+#mapHud {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 10;
+}
+
+.hud-btn {
+  background: rgba(20, 30, 50, 0.85);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  backdrop-filter: blur(4px);
+}
+
+.hud-btn:hover { background: rgba(30, 45, 75, 0.95); }
+.hud-btn.active { background: #2a4a8a; border-color: #5a8ad0; }
+
+/* Tooltip flotante */
+#mapTooltip {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(13, 17, 23, 0.95);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: monospace;
+  z-index: 20;
+  white-space: nowrap;
+}
+
+/* Side panel desde la derecha */
+#mapSidePanel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 360px;
+  height: 100%;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 16px;
+  z-index: 15;
+  transform: translateX(0);
+  transition: transform 200ms ease-out;
+}
+
+#mapSidePanel.hidden {
+  transform: translateX(100%);
+  display: block;     /* sobreescribimos el .hidden default para animar */
+}
+
+.sp-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sp-breadcrumb {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: monospace;
+}
+
+.sp-title {
+  font-size: 15px;
+  margin: 4px 0;
+  color: var(--text);
+}
+
+.sp-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 6px;
+}
+
+.sp-block {
+  background: var(--tool);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.sp-block h4 {
+  margin: 0 0 6px 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--muted);
+  letter-spacing: 0.5px;
+}
+
+.sp-config-json {
+  font-family: monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  color: var(--text);
+  margin: 0;
+}
+
+.sp-placeholder {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.sp-conn-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.sp-conn-list li {
+  font-size: 12px;
+  color: var(--text);
+  padding: 2px 0;
+}
+
+.sp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.sp-actions .btn { font-size: 12px; padding: 6px 12px; }
+
+/* CSS2D labels (renderizadas por CSS2DRenderer) */
+.city-label {
+  background: rgba(13, 17, 23, 0.85);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+
+.city-sublabel {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+  font-style: italic;
+}
+
+/* Empty state grande (cuando NO hay proyectos en absoluto) */
+#mapEmptyState {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5;
+}
+
+.empty-card {
+  background: rgba(20, 30, 50, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 32px;
+  text-align: center;
+  max-width: 360px;
+}
+
+.empty-card h2 { margin: 0 0 8px 0; font-size: 18px; }
+.empty-card p { margin: 0 0 16px 0; color: var(--muted); }
+
+/* Check verde efímero tras guardar drag */
+.save-pulse {
+  position: absolute;
+  pointer-events: none;
+  color: #22c55e;
+  font-size: 14px;
+  z-index: 25;
+  animation: pulseFade 1s ease-out forwards;
+}
+
+@keyframes pulseFade {
+  0%   { opacity: 0; transform: translateY(0); }
+  20%  { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-12px); }
+}

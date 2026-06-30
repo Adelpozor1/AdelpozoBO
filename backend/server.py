@@ -342,18 +342,29 @@ def linear_token_path(c: str, p: str) -> Path | None:
 
 def load_project_meta(c: str, p: str) -> dict:
     """Lee el .panel.json del proyecto. Si no existe → estado vacío. Si está
-    corrupto → lanza ValueError (el caller debe devolver 500 al cliente)."""
+    corrupto → lanza ValueError. Fase 3: rellena defaults para world_position
+    y position por servicio si faltan (backwards-compat con v1)."""
     mp = meta_path(c, p)
     if mp is None or not mp.exists():
-        return {"version": 1, "services": [], "connections": []}
+        return {
+            "version": 2,
+            "world_position": {"x": 0.0, "z": 0.0},
+            "services": [],
+            "connections": [],
+        }
     try:
         data = json.loads(mp.read_text())
     except json.JSONDecodeError as e:
         raise ValueError(f"{PROJECT_META_NAME} corrupto: {e}")
-    # normaliza por si falta algún campo top-level
     data.setdefault("version", 1)
     data.setdefault("services", [])
     data.setdefault("connections", [])
+    # Fase 3 defaults — backwards-compat con v1
+    if "world_position" not in data or not isinstance(data["world_position"], dict):
+        data["world_position"] = {"x": 0.0, "z": 0.0}
+    for s in data["services"]:
+        if isinstance(s, dict) and ("position" not in s or not isinstance(s["position"], dict)):
+            s["position"] = {"x": 0.0, "z": 0.0}
     return data
 
 
@@ -415,7 +426,8 @@ def validate_meta_payload(payload: dict) -> tuple[dict | None, str]:
     """Valida y normaliza un payload entrante para POST /api/projects/meta.
     Devuelve (data_normalizada, "") en éxito o (None, "mensaje de error").
     Asigna ids a servicios/conexiones que no los traen. Detecta colisiones,
-    referencias rotas y caps superados."""
+    referencias rotas y caps superados. Fase 3: valida world_position por
+    proyecto y position por servicio, ambos opcionales."""
     if not isinstance(payload, dict):
         return None, "payload debe ser objeto JSON"
     services = payload.get("services") or []
@@ -426,6 +438,20 @@ def validate_meta_payload(payload: dict) -> tuple[dict | None, str]:
         return None, f"máximo {MAX_SERVICES} servicios por proyecto"
     if len(connections) > MAX_CONNECTIONS:
         return None, f"máximo {MAX_CONNECTIONS} conexiones por proyecto"
+
+    # world_position (Fase 3) — opcional, {x, z} finitos en [-10000, 10000]
+    wp_in = payload.get("world_position")
+    if wp_in is not None:
+        if not isinstance(wp_in, dict):
+            return None, "world_position debe ser objeto {x, z}"
+        wx, wz = wp_in.get("x"), wp_in.get("z")
+        if not (isinstance(wx, (int, float)) and isinstance(wz, (int, float))):
+            return None, "world_position.x y world_position.z deben ser números"
+        if not (-10000 <= wx <= 10000 and -10000 <= wz <= 10000):
+            return None, "world_position fuera de rango [-10000, 10000]"
+        world_position = {"x": float(wx), "z": float(wz)}
+    else:
+        world_position = {"x": 0.0, "z": 0.0}
 
     seen_svc_ids: set[str] = set()
     out_services: list[dict] = []
@@ -443,6 +469,19 @@ def validate_meta_payload(payload: dict) -> tuple[dict | None, str]:
         cfg = s.get("config")
         if cfg is not None and not isinstance(cfg, dict):
             return None, f"servicio {i}: config debe ser objeto o null"
+        # position (Fase 3) — opcional
+        pos_in = s.get("position")
+        if pos_in is not None:
+            if not isinstance(pos_in, dict):
+                return None, f"servicio {i}: position debe ser objeto {{x, z}}"
+            px, pz = pos_in.get("x"), pos_in.get("z")
+            if not (isinstance(px, (int, float)) and isinstance(pz, (int, float))):
+                return None, f"servicio {i}: position.x y position.z deben ser números"
+            if not (-10000 <= px <= 10000 and -10000 <= pz <= 10000):
+                return None, f"servicio {i}: position fuera de rango [-10000, 10000]"
+            position = {"x": float(px), "z": float(pz)}
+        else:
+            position = {"x": 0.0, "z": 0.0}
         sid = s.get("id") or _new_id(kind)
         if sid in seen_svc_ids:
             return None, f"servicio {i}: id duplicado '{sid}'"
@@ -450,6 +489,7 @@ def validate_meta_payload(payload: dict) -> tuple[dict | None, str]:
         out_services.append({
             "id": sid, "kind": kind, "name": name.strip(),
             "config": cfg if cfg is not None else {},
+            "position": position,
         })
 
     seen_conn_ids: set[str] = set()
@@ -473,7 +513,12 @@ def validate_meta_payload(payload: dict) -> tuple[dict | None, str]:
         seen_conn_ids.add(cid)
         out_connections.append({"id": cid, "from": f, "to": t, "label": label})
 
-    return {"version": 1, "services": out_services, "connections": out_connections}, ""
+    return {
+        "version": 2,
+        "world_position": world_position,
+        "services": out_services,
+        "connections": out_connections,
+    }, ""
 
 
 def list_subdirs(base) -> list:
@@ -1004,7 +1049,7 @@ class Handler(BaseHTTPRequestHandler):
                 resp["linear_token_set"] = bool(read_linear_token())
             self._json(200, resp)
         elif path in ("/api/clients", "/api/projects", "/api/repos",
-                      "/api/repos/branches", "/api/projects/meta"):
+                      "/api/repos/branches", "/api/projects/meta", "/api/world"):
             if not self._is_authed():
                 return self._json(401, {"error": "no autorizado"})
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -1016,6 +1061,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._repos_of(q.get("client", [""])[0], q.get("project", [""])[0])
             elif path == "/api/projects/meta":
                 self._proj_meta_get(q.get("client", [""])[0], q.get("project", [""])[0])
+            elif path == "/api/world":
+                self._world_get()
             else:
                 self._repo_branches(q.get("client", [""])[0], q.get("project", [""])[0],
                                     q.get("name", [""])[0])
@@ -1294,6 +1341,40 @@ class Handler(BaseHTTPRequestHandler):
                 "has_global_fallback": has_global,
             },
         })
+
+    def _world_get(self):
+        """Devuelve TODO el mundo (clients → projects → meta) en un solo fetch
+        para evitar N+1 desde el frontend. Solo lee del disco; ningún secreto."""
+        out_clients = []
+        for client_dir in sorted([d for d in PROJECTS.iterdir() if d.is_dir()],
+                                 key=lambda d: d.name):
+            cname = client_dir.name
+            if not valid_name(cname):
+                continue
+            projs = []
+            for proj_dir in sorted([d for d in client_dir.iterdir() if d.is_dir()],
+                                   key=lambda d: d.name):
+                pname = proj_dir.name
+                if not valid_name(pname):
+                    continue
+                try:
+                    with project_lock(f"{cname}/{pname}"):
+                        meta = load_project_meta(cname, pname)
+                except ValueError as e:
+                    # Si un .panel.json está corrupto, lo saltamos y lo logueamos
+                    print(f"[world] skip {cname}/{pname}: {e}")
+                    continue
+                projs.append({
+                    "name": pname,
+                    "meta": {
+                        "version": meta.get("version", 1),
+                        "world_position": meta.get("world_position", {"x": 0.0, "z": 0.0}),
+                        "services": meta.get("services", []),
+                        "connections": meta.get("connections", []),
+                    },
+                })
+            out_clients.append({"name": cname, "projects": projs})
+        self._json(200, {"clients": out_clients})
 
     def _proj_meta_save(self):
         """Reemplaza la metadata del proyecto entera (servicios + conexiones).

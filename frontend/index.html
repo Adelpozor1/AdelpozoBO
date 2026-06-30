@@ -5,6 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Panel Claude</title>
 <link rel="stylesheet" href="/static/styles.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+  <link rel="stylesheet" href="/static/map3d.css">
 </head>
 <body>
   <div id="login">
@@ -22,7 +31,8 @@
   <header class="hidden" id="app-header">
     <span class="dot"></span><b>Claude</b>
     <nav id="sections">
-      <button id="tabDev" class="tab active">Proyectos</button>
+      <button id="tabMap" class="tab active">Mapa</button>
+      <button id="tabDev" class="tab">Proyectos</button>
       <button id="tabMon" class="tab">Monitorización</button>
       <button id="tabLinear" class="tab">Linear</button>
     </nav>
@@ -32,6 +42,24 @@
     <button id="profileBtn">Perfil</button>
     <button id="logoutBtn">Salir</button>
   </header>
+
+  <!-- HOME: mapa 3D (Fase 3) -->
+  <div id="map-home" class="hidden">
+    <div id="mapCanvasWrap"></div>
+    <div id="mapHud">
+      <button id="mapEditToggle" class="hud-btn" title="Bloquea o desbloquea drag">🔒 Layout fijo</button>
+      <button id="mapWorldBtn" class="hud-btn hidden" title="Volver al mundo">🌍 Ver mundo</button>
+    </div>
+    <div id="mapTooltip" class="hidden"></div>
+    <div id="mapSidePanel" class="hidden"></div>
+    <div id="mapEmptyState" class="hidden">
+      <div class="empty-card">
+        <h2>Aún no tienes proyectos</h2>
+        <p>Crea uno para verlo aquí como ciudad.</p>
+        <button id="mapEmptyCreate" class="btn primary">Crear proyecto</button>
+      </div>
+    </div>
+  </div>
 
   <div id="clients-view" class="screen hidden">
     <div class="screen-head">

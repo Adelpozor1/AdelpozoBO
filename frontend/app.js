@@ -61,7 +61,7 @@ async function doLogin() {
 async function showApp() {
   $("#login").classList.add("hidden");
   $("#app-header").classList.remove("hidden");
-  setSection("dev");
+  setSection("map");
   await restore();
 }
 async function restore() {
@@ -92,9 +92,11 @@ function showDev(screen) {
   $("#main-row").classList.toggle("hidden", screen !== "repos");
 }
 function setSection(s) {
+  $("#tabMap").classList.toggle("active", s === "map");
   $("#tabDev").classList.toggle("active", s === "dev");
   $("#tabMon").classList.toggle("active", s === "mon");
   $("#tabLinear").classList.toggle("active", s === "linear");
+  $("#map-home").classList.toggle("hidden", s !== "map");
   $("#mon-view").classList.toggle("hidden", s !== "mon");
   $("#linear-view").classList.toggle("hidden", s !== "linear");
   const devIds = ["#clients-view", "#projects-view", "#main-row"];
@@ -102,7 +104,9 @@ function setSection(s) {
   if (s === "dev") { monStop(); showDev(devScreen); }
   else if (s === "mon") { monEnter(); }
   else if (s === "linear") { linearEnter(); }
+  else if (s === "map") { mapEnter(); }
 }
+$("#tabMap").onclick = () => setSection("map");
 $("#tabDev").onclick = () => setSection("dev");
 $("#tabMon").onclick = () => setSection("mon");
 $("#tabLinear").onclick = () => setSection("linear");
@@ -132,19 +136,29 @@ $("#newClientBtn").onclick = async () => {
   const name = (prompt("Nombre del cliente:") || "").trim();
   if (!name) return;
   const r = await fetch("/api/clients/create", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name}) });
-  if (r.ok) loadClients();
+  if (r.ok) {
+    loadClients();
+    if (map3dApi && map3dApi.loadWorld) map3dApi.loadWorld();
+  }
   else { const j = await r.json().catch(() => ({})); alert(j.error || "No se pudo crear"); }
 };
 async function delClient(name) {
   if (!confirm(`¿Borrar el cliente "${name}" y TODOS sus proyectos y repos?`)) return;
   const r = await fetch("/api/clients/delete", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name}) });
-  if (r.ok) loadClients(); else alert("No se pudo borrar");
+  if (r.ok) {
+    loadClients();
+    if (map3dApi && map3dApi.loadWorld) map3dApi.loadWorld();
+  } else alert("No se pudo borrar");
 }
 async function renameClient(name) {
   const nn = (prompt("Nuevo nombre del cliente:", name) || "").trim();
   if (!nn || nn === name) return;
   const r = await fetch("/api/clients/rename", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name, new_name: nn}) });
-  if (r.ok) { if (selClient === name) { selClient = nn; localStorage.setItem("lastClient", nn); } loadClients(); }
+  if (r.ok) {
+    if (selClient === name) { selClient = nn; localStorage.setItem("lastClient", nn); }
+    loadClients();
+    if (map3dApi && map3dApi.loadWorld) map3dApi.loadWorld();
+  }
   else { const j = await r.json().catch(() => ({})); alert(j.error || "No se pudo renombrar"); }
 }
 async function openClient(name) {
@@ -180,19 +194,29 @@ $("#newProjectBtn").onclick = async () => {
   const name = (prompt("Nombre del proyecto:") || "").trim();
   if (!name) return;
   const r = await fetch("/api/projects/create", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({client: selClient, name}) });
-  if (r.ok) loadProjects();
+  if (r.ok) {
+    loadProjects();
+    if (map3dApi && map3dApi.loadWorld) map3dApi.loadWorld();
+  }
   else { const j = await r.json().catch(() => ({})); alert(j.error || "No se pudo crear"); }
 };
 async function delProject(name) {
   if (!confirm(`¿Borrar el proyecto "${name}" y todos sus repos?`)) return;
   const r = await fetch("/api/projects/delete", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({client: selClient, name}) });
-  if (r.ok) loadProjects(); else alert("No se pudo borrar");
+  if (r.ok) {
+    loadProjects();
+    if (map3dApi && map3dApi.loadWorld) map3dApi.loadWorld();
+  } else alert("No se pudo borrar");
 }
 async function renameProject(name) {
   const nn = (prompt("Nuevo nombre del proyecto:", name) || "").trim();
   if (!nn || nn === name) return;
   const r = await fetch("/api/projects/rename", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({client: selClient, name, new_name: nn}) });
-  if (r.ok) { if (selProject === name) { selProject = nn; localStorage.setItem("lastProject", nn); } loadProjects(); }
+  if (r.ok) {
+    if (selProject === name) { selProject = nn; localStorage.setItem("lastProject", nn); }
+    loadProjects();
+    if (map3dApi && map3dApi.loadWorld) map3dApi.loadWorld();
+  }
   else { const j = await r.json().catch(() => ({})); alert(j.error || "No se pudo renombrar"); }
 }
 async function openProject(name) {
@@ -1189,5 +1213,24 @@ function when(iso) {
   return d.toLocaleDateString();
 }
 $("#linearRefresh").onclick = () => { linearLoaded = false; linearFetch(); };
+
+// --------------------------------------------------------------------------- //
+// Mapa 3D (Fase 3): lazy import de Three.js solo cuando se abre la pestaña.
+// --------------------------------------------------------------------------- //
+let map3dApi = null;
+async function mapEnter() {
+  const host = $("#map-home");
+  if (!map3dApi) {
+    try {
+      const mod = await import("/static/map3d.js");
+      map3dApi = mod;
+    } catch (e) {
+      console.error("No se pudo cargar map3d.js:", e);
+      host.innerHTML = '<div style="padding:20px;color:#ef4444">No se pudo cargar el mapa: ' + esc(e.message) + '</div>';
+      return;
+    }
+  }
+  map3dApi.initMap3D(host);
+}
 
 checkAuth();
